@@ -1,0 +1,10 @@
+.env
+data/*
+!data/.gitkeep
+__pycache__/
+# live config and prompts (created from app/defaults on first start)
+conf/config.yaml
+conf/prompts/
+!conf/.gitkeep
+# private deployment notes
+OPERATIONS.md

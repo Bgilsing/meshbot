@@ -1,0 +1,32 @@
+# meshbot configuration. Everything here can also be edited from the web UI (Settings / Channels tabs),
+# which keeps these comments. Anything left out uses the defaults declared in app/schema.py.
+# Changes to `companion` or to the channel list/slots/secrets reconnect the companion automatically.
+
+enabled: true            # global kill switch: false = keep deciding and logging, never transmit
+bot_name: MeshBot        # must match the openHop companion's node name (the name other nodes see)
+
+companion:
+  host: 127.0.0.1
+  port: 5070
+  path_hash_bytes: '1'   # bytes per repeater hash in sent paths: match your network (1, 2 or 3)
+
+llm:
+  base_url: http://localhost:4000/v1   # LiteLLM (or any OpenAI-compatible endpoint)
+  model: ""                            # set this: the model name as your endpoint knows it
+  fallback_model: ""                   # optional, e.g. a local model for when the internet is down
+
+defaults:                # every channel uses these unless it overrides them
+  mode: shadow           # live = transmit | shadow = decide + log only | off = ignore channel
+  eagerness: normal      # low | normal | high
+
+tools:
+  weather_location: ""   # default place for weather questions: "City, ST" or a ZIP
+
+ignore_senders: []       # other bots on your mesh, so they can't loop with this one
+
+# Hashtag channels (#name) derive their key from the name. Private channels (any other name) need a secret:
+# set or generate it on the Channels tab (stored in data/secrets.json), or use secret_env naming an .env variable.
+# slot = channel index on the companion; give each channel its own slot (0 is usually Public).
+channels:
+  - name: '#meshbot'
+    slot: 1

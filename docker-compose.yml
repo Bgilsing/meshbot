@@ -1,0 +1,21 @@
+# meshbot: an AI on MeshCore channels. Talks to an openHop companion on 127.0.0.1:5070 (host networking
+# because that port is bound to localhost) and to an OpenAI-compatible endpoint such as LiteLLM.
+# Web control panel: http://<WEB_BIND>:<WEB_PORT> (login admin; see README for the password).
+# Host-specific values (TZ, WEB_BIND, keys) go in .env, see .env.example.
+services:
+  meshbot:
+    build: .
+    image: meshbot:local
+    container_name: meshbot
+    restart: unless-stopped
+    network_mode: host
+    env_file:
+      - path: .env
+        required: false   # optional: secrets in it can be set from the web UI instead
+    environment:
+      TZ: ${TZ:-UTC}
+      WEB_BIND: ${WEB_BIND:-127.0.0.1}   # set to this host's LAN IP to reach the UI from other machines
+      WEB_PORT: ${WEB_PORT:-8093}
+    volumes:
+      - ./conf:/srv/conf        # config.yaml + prompts/ (created on first start), editable from the web UI
+      - ./data:/srv/data        # history.db, decisions.jsonl, secrets.json (API keys, channel keys)
