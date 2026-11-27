@@ -129,6 +129,7 @@ def settings_payload(cfg) -> dict:
                         "llm_api_key_env": bool(os.environ.get("LITELLM_API_KEY")),
                         "openhop_api_key": bool(cfg.secrets.get("openhop_api_key")),
                         "openhop_api_key_env": bool(os.environ.get("OPENHOP_API_KEY")),
+                        "qrz": bool(cfg.secrets.get("qrz_username") and cfg.secrets.get("qrz_password")),
                         "guest_passwords": [l.partition("=")[0].strip() for l in
                                             (cfg.secrets.get("guest_passwords") or "").splitlines() if l.strip()],
                         "web_password": bool(cfg.secrets.get("web_password_hash"))},
@@ -215,6 +216,11 @@ async def post_secrets(request):
     if "openhop_api_key" in body:
         cfg.secrets.set("openhop_api_key", (body["openhop_api_key"] or "").strip() or None)
         log.info("openHop API key %s from web", "updated" if body["openhop_api_key"] else "cleared")
+    for k in ("qrz_username", "qrz_password"):
+        if k in body:
+            cfg.secrets.set(k, (body[k] or "").strip() or None)
+            request.app[BOT].brain.callsigns._key = None  # new login: drop the old QRZ session
+            log.info("%s %s from web", k, "updated" if body[k] else "cleared")
     if "guest_passwords" in body:
         text = "\n".join(l.strip() for l in str(body["guest_passwords"] or "").splitlines() if l.strip())
         bad = [l for l in text.splitlines() if "=" not in l]
@@ -381,6 +387,16 @@ async def test_mesh(request):
 async def hass_tools(request):
     """The Home Assistant MCP server LiteLLM exposes and how each tool is classified. Calls no tools."""
     return J(await request.app[BOT].brain.hass.overview())
+
+
+@routes.post("/api/test_callsign")
+async def test_callsign(request):
+    call = str((await request.json()).get("callsign") or "W1AW")
+    try:
+        text, meta = await request.app[BOT].brain.callsigns.lookup(call)
+        return J({"ok": True, "text": text, **meta})
+    except Exception as e:
+        return J({"ok": False, "error": str(e)[:300]})
 
 
 @routes.get("/api/models")

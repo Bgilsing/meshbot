@@ -16,6 +16,7 @@ from .tools import enabled_tools
 from .history import Msg
 from . import tools as T
 from .hass import HassTools
+from .callsign import CallsignLookup
 
 log = logging.getLogger("meshbot.brain")
 
@@ -89,6 +90,11 @@ def tool_rules(channel: dict, max_calls: int) -> str:
                    "(official or primary sources first) and answer from what the page says. If a page fails or is "
                    "nearly empty, read the next result instead. Name the source briefly when it helps. Only if the "
                    "tools truly come up empty, say so and point to the best source.")
+    if "callsign_lookup" in names:
+        out.append("- callsign_lookup returns a licensee's first name, last initial and city/state. Use it when "
+                   "someone asks for the person behind a callsign (their name, where they're from) or whether a call "
+                   "is valid. For a plain 'who is X' about a mesh user, lead with their nodes (mesh tools, if offered) "
+                   "and only add the licensee details when asked. Many node names contain the owner's callsign.")
     if "mesh_node" in names:
         radio = ("Radio queries are ON: naming a repeater in repeater_status/repeater_neighbors logs in to it "
                  "over the air, and mesh_hops live=true runs a path discovery. These use airtime, so only when "
@@ -163,6 +169,7 @@ class Brain:
         self.health: dict[str, dict] = {}
         self.meshtools = None  # set by Bot (needs the companion connection)
         self.hass = HassTools(self)
+        self.callsigns = CallsignLookup(cfg, lambda: self.client)
 
     async def close(self):
         await self.client.aclose()
@@ -313,6 +320,8 @@ class Brain:
         tcfg = self.cfg.section("tools")
         if name.startswith("ha_"):
             return await self.hass.call(name, args, channel)
+        if name == "callsign_lookup":
+            return await self.callsigns.lookup(str(args.get("callsign") or ""))
         if name in T.MESH_TOOLS:
             if self.meshtools is None:
                 raise T.ToolError("mesh tools are not available")

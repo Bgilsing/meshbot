@@ -123,14 +123,20 @@ const TABS = {};
 TABS.dashboard = async main => {
   await loadSettings();
   const wrap = h("div");
-  main.append(wrap);
-  const draw = async () => {
+  // The send box lives outside the refreshed area, so typing survives the 5 s refresh.
+  main.append(wrap, sendCard());
+  const draw = async (force) => {
+    // Don't redraw under the user's hands (e.g. an open mode dropdown).
+    const a = document.activeElement;
+    const typing = a && wrap.contains(a) && (a.tagName === "SELECT" || a.tagName === "TEXTAREA" ||
+      (a.tagName === "INPUT" && !["checkbox", "radio", "button"].includes(a.type)));
+    if (force !== true && typing) return;
     const s = state.status = await api("GET", "/api/status");
     updateHeader(s);
     const c = s.companion, llm = s.llm, d24 = s.last_24h.decisions;
     const enabled = h("input", { type: "checkbox", checked: s.enabled, onchange: async e => {
       await api("POST", "/api/settings", { values: { enabled: e.target.checked } });
-      toast(e.target.checked ? "Transmit enabled" : "Transmit disabled (kill switch)"); draw(); } });
+      toast(e.target.checked ? "Transmit enabled" : "Transmit disabled (kill switch)"); draw(true); } });
     const nameMismatch = c.connected && c.name && c.name !== s.bot_name;
     wrap.replaceChildren(
       h("div", { class: "hero" }, h("img", { src: "/static/logo.svg", alt: "meshbot", width: 244, height: 120 }),
@@ -155,7 +161,7 @@ TABS.dashboard = async main => {
           c.error && !c.connected ? h("div", { class: "small", style: "color:var(--bad);margin-top:4px" }, c.error) : "",
           nameMismatch ? h("div", { class: "small", style: "margin-top:8px" },
             `Companion is "${c.name}" but bot_name is "${s.bot_name}". `,
-            h("button", { onclick: async () => { await api("POST", "/api/rename_companion"); toast("Companion renamed"); draw(); } },
+            h("button", { onclick: async () => { await api("POST", "/api/rename_companion"); toast("Companion renamed"); draw(true); } },
               `Rename companion to ${s.bot_name}`)) : ""),
         h("div", { class: "card" }, h("h2", {}, "Models"),
           ...s.models.map(m => {
@@ -173,7 +179,7 @@ TABS.dashboard = async main => {
             e.target.disabled = true; e.target.textContent = "Testing...";
             try { const r = await api("POST", "/api/test_llm");
               r.results.forEach(x => x.ok ? toast(`${x.model}: OK in ${x.latency_s}s`) : toast(`${x.model}: ${x.error}`, true));
-            } finally { e.target.disabled = false; e.target.textContent = "Test models"; draw(); } } }, "Test models"),
+            } finally { e.target.disabled = false; e.target.textContent = "Test models"; draw(true); } } }, "Test models"),
             h("span", { class: "muted small" }, "A passing test also ends a failover hold."))),
         meshCard(s.mesh_data),
         h("div", { class: "card" }, h("h2", {}, "Last 24 hours"),
@@ -189,7 +195,7 @@ TABS.dashboard = async main => {
           h("tr", {}, h("th", {}, "Channel"), h("th", {}, "Slot"), h("th", {}, "Mode"), h("th", {}, "Eagerness"),
             h("th", {}, "Models"), h("th", {}, "Link"), h("th", {}, "Replies / hr"), h("th", {}, "Last reply")),
           ...s.channels.map(ch => {
-            const sel = h("select", { onchange: e => setChannelValue(ch.name, "mode", e.target.value).then(draw) },
+            const sel = h("select", { onchange: e => setChannelValue(ch.name, "mode", e.target.value).then(() => { e.target.blur(); draw(true); }) },
               ...["live", "shadow", "off"].map(m => h("option", { value: m }, m)));
             sel.value = ch.mode;
             return h("tr", {}, h("td", {}, h("b", {}, ch.name), ch.private ? h("span", { class: "muted small" }, " private") : ""),
@@ -199,7 +205,6 @@ TABS.dashboard = async main => {
                 ch.link ? h("span", { class: "small", style: "color:var(--bad)" }, ch.link) : h("span", { class: "muted" }, "-")),
               h("td", {}, ch.replies_last_hour), h("td", {}, ago(ch.last_reply)));
           })) : h("div", { class: "muted" }, "No channels yet. Add one on the Channels tab.")),
-      sendCard(),
     );
   };
   every(5000, draw);
@@ -604,6 +609,8 @@ TABS.settings = async main => {
   // Secrets first: they're what people come here for on day one.
   const key = h("input", { type: "password", placeholder: sec.llm_api_key ? "(set; type to replace)" : "sk-...", autocomplete: "off", style: "width:320px" });
   const ohKey = h("input", { type: "password", placeholder: sec.openhop_api_key ? "(set; type to replace)" : "API token", autocomplete: "off", style: "width:320px" });
+  const qrzUser = h("input", { type: "text", placeholder: sec.qrz ? "(set) username" : "QRZ username", autocomplete: "off", style: "width:160px" });
+  const qrzPass = h("input", { type: "password", placeholder: "QRZ password", autocomplete: "off", style: "width:160px" });
   const guestPw = h("textarea", { placeholder: "IN.ALL.Example.Rptr=hello", autocomplete: "off", style: "min-height:60px;width:420px" });
   const pwCur = h("input", { type: "password", placeholder: "current password", autocomplete: "current-password" });
   const pwNew = h("input", { type: "password", placeholder: "new password (8+ chars)", autocomplete: "new-password" });
@@ -624,6 +631,16 @@ TABS.settings = async main => {
           state.settings = await api("POST", "/api/secrets", { openhop_api_key: ohKey.value }); toast("openHop key saved"); showTab("settings"); } }, "Save"),
         sec.openhop_api_key ? h("button", { class: "danger", onclick: async () => { if (!confirm("Clear the openHop API key?")) return;
           state.settings = await api("POST", "/api/secrets", { openhop_api_key: null }); showTab("settings"); } }, "Clear") : "")),
+    h("label", { class: "field" }, h("div", {}, "QRZ.com login", h("div", { class: "help" },
+        "Optional, for worldwide callsign lookups (QRZ XML data subscription). Without it, US calls use free FCC data. Only first name, last initial and city/state are ever returned. ",
+        sec.qrz ? "Set." : "Not set.")),
+      h("div", { class: "row" }, qrzUser, qrzPass,
+        h("button", { class: "primary", onclick: async () => { if (!qrzUser.value || !qrzPass.value) return toast("Enter both", true);
+          state.settings = await api("POST", "/api/secrets", { qrz_username: qrzUser.value, qrz_password: qrzPass.value }); toast("QRZ login saved"); showTab("settings"); } }, "Save"),
+        sec.qrz ? h("button", { class: "danger", onclick: async () => { if (!confirm("Clear the QRZ login?")) return;
+          state.settings = await api("POST", "/api/secrets", { qrz_username: null, qrz_password: null }); showTab("settings"); } }, "Clear") : "",
+        h("button", { onclick: async () => { const c = prompt("Callsign to test:", "W1AW"); if (!c) return;
+          const r = await api("POST", "/api/test_callsign", { callsign: c }); r.ok ? toast(`${r.text} (${r.source || "no record"})`) : toast(r.error, true); } }, "Test lookup"))),
     h("label", { class: "field" }, h("div", {}, "Repeater guest passwords", h("div", { class: "help" },
         "One per line: Repeater name=password. Used by radio queries; others use the default guest password in Mesh data. ",
         (sec.guest_passwords || []).length ? `Set for: ${sec.guest_passwords.join(", ")}. Saving replaces the whole list.` : "None set.")),

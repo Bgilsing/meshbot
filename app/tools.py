@@ -310,6 +310,11 @@ DEFS = {
         "parameters": {"type": "object", "properties": {
             "location": {"type": "string", "description": "City, 'City, ST', or US ZIP code. Omit for the default "
                                                           "location."}}, "required": []}},
+    "callsign_lookup": {
+        "description": "Look up an amateur radio callsign: the licensee's first name, last initial and city/state "
+                       "(or the club name for club stations). Nothing else is returned.",
+        "parameters": {"type": "object", "properties": {
+            "callsign": {"type": "string", "description": "The callsign, e.g. W1AW"}}, "required": ["callsign"]}},
     "mesh_node": {
         "description": "Look up one MeshCore node (repeater, companion, room) on the local mesh map: role, when it "
                        "was last heard, distance/direction from home, relay activity, battery, neighbors.",
@@ -362,6 +367,8 @@ def enabled_tools(channel: dict) -> list[str]:
         names += ["web_search", "read_page"]
     if channel.get("weather"):
         names.append("weather")
+    if channel.get("callsign_lookup"):
+        names.append("callsign_lookup")
     if channel.get("mesh_data"):
         names += list(MESH_TOOLS)
     return names
@@ -379,7 +386,7 @@ def summarize_args(name: str, args: dict) -> str:
         if args.get("live"):
             bits.append("live")
         return " ".join(bits)[:200]
-    return str(args.get("query") or args.get("url") or args.get("location") or "")[:200]
+    return str(args.get("query") or args.get("url") or args.get("location") or args.get("callsign") or "")[:200]
 
 
 def parse_args(raw) -> dict:

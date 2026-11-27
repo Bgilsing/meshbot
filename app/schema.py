@@ -47,6 +47,9 @@ CHANNEL_FIELDS = [
     F("web_search", "bool", "Web search + read pages", False,
       "Let the model search the web (LiteLLM's Brave MCP tool) and read the pages it finds. Slower replies."),
     F("weather", "bool", "Weather tool", True, "Let the model look up current weather, forecast and NWS alerts."),
+    F("callsign_lookup", "bool", "Callsign lookup", True,
+      "Look up amateur callsigns: first name, last initial and city/state only. Uses QRZ when its login is set in "
+      "Secrets, otherwise free US FCC data (callook.info)."),
     F("mesh_data", "bool", "Mesh data tools", False,
       "Let the model look up nodes, hops, network activity (CoreScope) and our repeater's stats (openHop). "
       "Read-only, nothing is transmitted."),

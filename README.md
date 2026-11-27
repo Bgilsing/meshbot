@@ -24,6 +24,7 @@ LoRa radio <-> openHop repeater --(companion protocol, TCP 127.0.0.1:5070)--> me
 - **Tools**, switched per channel:
   - web search (via a LiteLLM MCP server such as Brave) plus reading pages
   - weather (Open-Meteo, plus US NWS alerts)
+  - amateur callsign lookup: first name, last initial and city/state only (QRZ, or free US FCC data)
   - mesh data: nodes, last heard, hops, neighbors and network activity, from
     [CoreScope](https://github.com/kpa-clawbot/corescope) and openHop
   - radio queries: guest login to a repeater for its neighbors or status, and live path discovery
@@ -111,6 +112,14 @@ a timeout to every message. "Test models" on the Dashboard ends a hold early.
   to probe your network.
 - **Weather:** Open-Meteo forecast plus active NWS alerts (US). Accepts a ZIP or a place, and defaults to
   `weather_location`.
+- **Callsign lookup** (`app/callsign.py`, on by default):
+  - Sources: QRZ.com's XML service when a QRZ login is set in Settings > Secrets (worldwide), otherwise free US FCC
+    data from callook.info.
+  - Returns only the licensee's first name, last initial and city/state, plus country outside the US; club stations
+    get the club name. Street address, email, coordinates and license details are dropped in code, so the model
+    never sees them.
+  - The prompt makes mesh data the default answer to "who is" questions. Personal details are given only when
+    someone asks for them.
 - **Mesh data** (`app/meshdata.py`): `mesh_node`, `mesh_nodes`, `mesh_overview`, `mesh_hops`, `repeater_status`,
   `repeater_neighbors`.
   - Sources: CoreScope's REST API (channel message text is never read), the companion's route and advert-path
