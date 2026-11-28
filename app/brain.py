@@ -26,6 +26,9 @@ EAGERNESS = {
     "high": "Be helpful and forthcoming. Reply to most questions and requests, but still skip pure chit-chat.",
 }
 
+DM_RULE = ("This message was sent to you directly. Always respond (respond=true), briefly, speaking to them alone. "
+           "Even thanks or a greeting gets a short friendly reply.")
+
 DECISION_SCHEMA = {
     "type": "object",
     "properties": {
@@ -106,6 +109,10 @@ def tool_rules(channel: dict, max_calls: int) -> str:
                    "'(N hops)' after a sender's name means N repeaters relayed their message to you; '(direct)' "
                    "means you heard them with no repeater in between. "
                    + radio)
+    if "send_advert" in names:
+        out.append("- send_advert broadcasts your advert so nodes can add you as a contact and send you direct "
+                   "messages. Call it only when someone asks you to advert / advertise / announce yourself, then "
+                   "say whether it went out.")
     if ha:
         control = channel.get("home_assistant") == "control"
         if control:
@@ -123,14 +130,21 @@ def tool_rules(channel: dict, max_calls: int) -> str:
 def runtime_rules(bot_name: str, channel: dict, now: datetime | None = None, max_searches: int = 0) -> str:
     now = now or datetime.now().astimezone()
     ptb, maxp = int(channel["packet_text_bytes"]), int(channel["max_parts"])
-    one = part_budget(ptb, bot_name, 1)
-    many = part_budget(ptb, bot_name, maxp)
-    eager = EAGERNESS.get(str(channel.get("eagerness", "normal")), EAGERNESS["normal"])
+    dm = bool(channel.get("dm"))
+    one = part_budget(ptb, bot_name, 1, not dm)
+    many = part_budget(ptb, bot_name, maxp, not dm)
+    if dm:
+        where = (f"Private direct message conversation with {channel.get('sender') or channel['name'][1:]} "
+                 "(only the two of you see it).")
+        eager = DM_RULE
+    else:
+        where = f"Channel: {channel['name']}."
+        eager = EAGERNESS.get(str(channel.get("eagerness", "normal")), EAGERNESS["normal"])
     return (
         "## Runtime facts\n"
-        f"- Your name on the mesh: {bot_name}. Channel: {channel['name']}.\n"
+        f"- Your name on the mesh: {bot_name}. {where}\n"
         f"- Local time now: {now.strftime('%A %Y-%m-%d %H:%M %Z')}.\n"
-        f"- Eagerness: {eager}\n"
+        f"- {'Direct message' if dm else 'Eagerness'}: {eager}\n"
         + tool_rules(channel, max_searches)
         + "\n"
         "## Output format\n"
@@ -168,6 +182,7 @@ class Brain:
         # Per-model health for failover: ok, last_ok, last_error, error_time, down_until.
         self.health: dict[str, dict] = {}
         self.meshtools = None  # set by Bot (needs the companion connection)
+        self.advert_hook = None  # set by Bot: async (channel) -> (text, meta)
         self.hass = HassTools(self)
         self.callsigns = CallsignLookup(cfg, lambda: self.client)
 
@@ -279,14 +294,32 @@ class Brain:
         channel = {**channel, "weather_location": self.cfg.value("tools.weather_location")}
         system = (system_prompt.replace("{bot_name}", bot) + "\n\n"
                   + runtime_rules(bot, channel, max_searches=int(self.cfg.value("tools.max_searches"))))
-        user = (f"Channel {channel['name']} thread, oldest first. The newest message is marked >>>.\n\n"
-                + format_thread(msgs, bot)
-                + "\n\nShould you respond to the newest message? Answer with the JSON object only.")
+        if channel.get("dm"):
+            user = (f"Direct messages between you and {channel.get('sender') or channel['name'][1:]}, oldest first. "
+                    "The newest message is marked >>>.\n\n" + format_thread(msgs, bot)
+                    + "\n\nAnswer the newest message. Reply with the JSON object only.")
+        else:
+            user = (f"Channel {channel['name']} thread, oldest first. The newest message is marked >>>.\n\n"
+                    + format_thread(msgs, bot)
+                    + "\n\nShould you respond to the newest message? Answer with the JSON object only.")
         return system, user
 
     async def decide(self, system_prompt: str, channel: dict, msgs: list[Msg]) -> Decision:
         channel = {**channel, "_ha_defs": await self.hass.defs_for(channel)}
-        return await self._decide_raw(*self.build_prompts(system_prompt, channel, msgs), channel=channel)
+        system, user = self.build_prompts(system_prompt, channel, msgs)
+        d = await self._decide_raw(system, user, channel=channel)
+        if channel.get("dm") and not d.error and not d.respond:
+            # DMs always get an answer: ask once more, insisting.
+            first = d
+            d = await self._decide_raw(system, user + "\n\nThis is a direct message to you, so you must reply: "
+                                       "respond=true with a short answer.", channel=channel)
+            d.searches = first.searches + d.searches
+            d.latency_s = round(first.latency_s + d.latency_s, 2)
+            for k, v in first.usage.items():
+                if isinstance(v, (int, float)):
+                    d.usage[k] = d.usage.get(k, 0) + v
+            d.reason = (d.reason + " [re-asked: DM]").strip()
+        return d
 
     async def models(self) -> list[str]:
         llm = self.cfg.section("llm")
@@ -320,6 +353,10 @@ class Brain:
         tcfg = self.cfg.section("tools")
         if name.startswith("ha_"):
             return await self.hass.call(name, args, channel)
+        if name == "send_advert":
+            if self.advert_hook is None:
+                raise T.ToolError("adverts are not available")
+            return await self.advert_hook(channel or {})
         if name == "callsign_lookup":
             return await self.callsigns.lookup(str(args.get("callsign") or ""))
         if name in T.MESH_TOOLS:
@@ -495,7 +532,7 @@ class Brain:
         """Ask the model to compress an over-long answer to fit. Returns new parts or None."""
         bot = self.cfg.bot_name
         maxp = int(channel["max_parts"])
-        per = part_budget(int(channel["packet_text_bytes"]), bot, maxp)
+        per = part_budget(int(channel["packet_text_bytes"]), bot, maxp, not channel.get("dm"))
         system = ("You compress answers for a tiny-bandwidth mesh radio. Plain ASCII, no markdown, telegraphic, "
                   "keep the key facts and numbers, drop everything else. "
                   'Return ONLY JSON: {"respond": true, "reason": "shortened", "parts": ["..."]}. '

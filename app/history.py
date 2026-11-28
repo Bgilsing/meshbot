@@ -98,6 +98,14 @@ class History:
             out.append(d)
         return out
 
+    def dm_conversations(self, days: float = 30) -> list[str]:
+        """DM conversation names ("@Name") with traffic in the last `days`, most recent first."""
+        with self.lock:
+            rows = self.db.execute("SELECT channel, MAX(ts) t FROM messages WHERE channel LIKE '@%' AND ts>=? "
+                                   "GROUP BY channel ORDER BY t DESC LIMIT 50",
+                                   (time.time() - days * 86400,)).fetchall()
+        return [r[0] for r in rows]
+
     def counts(self, since: float) -> dict:
         with self.lock:
             heard = self.db.execute("SELECT COUNT(*) FROM messages WHERE ts>=? AND own=0", (since,)).fetchone()[0]

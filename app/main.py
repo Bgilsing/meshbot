@@ -12,7 +12,8 @@ import httpx
 
 from .brain import Brain, Decision
 from .compress import blen, clean, fit, part_budget
-from .config import DATA, Config, bootstrap, load_prompt
+from . import tools as T
+from .config import DATA, Config, atomic_write, bootstrap, is_dm, load_prompt
 from .history import History, Msg
 from .mesh import Incoming, Mesh
 from .meshdata import MeshTools
@@ -20,6 +21,7 @@ from .meshdata import MeshTools
 log = logging.getLogger("meshbot")
 
 DECISIONS = DATA / "decisions.jsonl"
+STATE = DATA / "state.json"  # small runtime state that survives restarts (last advert)
 
 
 def msg_dict(m: Msg) -> dict:
@@ -56,11 +58,38 @@ class Bot:
         self.started = time.time()
         self.llm_status: dict = {}                         # last call: ok/error, latency, time
         self.logbuf: LogBuffer | None = None
+        self.dm_keys: dict[str, str] = {}                  # "@Name" -> sender key prefix (where DM replies go)
+        self.adverts: deque = deque(maxlen=10)             # (time, source, flood, error|None)
+        self.state = self._load_state()
+        self.brain.advert_hook = self.request_advert
+
+    # ---------- small persistent state ----------
+    def _load_state(self) -> dict:
+        try:
+            return json.loads(STATE.read_text())
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {}
+
+    def _save_state(self) -> None:
+        try:
+            atomic_write(STATE, json.dumps(self.state, indent=1))
+        except OSError as e:
+            log.warning("could not save %s: %s", STATE, e)
+
+    def conversation(self, name: str) -> dict | None:
+        """Settings for a channel name or a DM conversation ("@Name")."""
+        if is_dm(name):
+            return self.cfg.dm_profile(name[1:])
+        return self.cfg.channel_by_name(name)
 
     # ---------- intake ----------
     async def on_message(self, inc: Incoming) -> None:
         self.cfg.reload()
-        ch = self.cfg.channel_by_slot(inc.slot)
+        if inc.dm:
+            ch = self.cfg.dm_profile(inc.sender)
+            self.dm_keys[ch["name"]] = inc.sender_key
+        else:
+            ch = self.cfg.channel_by_slot(inc.slot)
         if not ch:
             log.debug("message on unconfigured slot %s ignored", inc.slot)
             return
@@ -93,7 +122,7 @@ class Bot:
             if gen != self.gen[name]:
                 return
             self.cfg.reload()
-            ch = self.cfg.channel_by_name(name)
+            ch = self.conversation(name)
             if not ch or ch.get("mode") == "off":
                 return
             msgs = self.history.recent(name, int(ch["history"]), float(ch["history_max_age_h"]))
@@ -119,11 +148,12 @@ class Bot:
         """Fit model output to packets, with one shorten re-ask if it overflows."""
         bot, ptb, maxp = self.cfg.bot_name, int(ch["packet_text_bytes"]), int(ch["max_parts"])
         out: dict = {}
-        f = fit(parts, bot, ptb, maxp, allow_truncate=False)
+        prefix = not ch.get("dm")
+        f = fit(parts, bot, ptb, maxp, allow_truncate=False, prefix=prefix)
         if f.overflow:
             shorter = await self.brain.shorten(parts, ch)
             out["shortened"] = shorter
-            f = fit(shorter or parts, bot, ptb, maxp, allow_truncate=True)
+            f = fit(shorter or parts, bot, ptb, maxp, allow_truncate=True, prefix=prefix)
         out.update({"parts": f.parts, "resplit": f.resplit, "truncated": f.truncated})
         return out
 
@@ -161,7 +191,11 @@ class Bot:
         for i, part in enumerate(parts):
             if i:
                 await asyncio.sleep(float(ch["part_gap_s"]))
-            if not await self.mesh.send(int(ch["slot"]), part):
+            if ch.get("dm"):
+                key = self.dm_keys.get(name)
+                if not key or not await self.mesh.send_dm(key, part):
+                    break
+            elif not await self.mesh.send(int(ch["slot"]), part):
                 break
             self.history.add(name, self.cfg.bot_name, part, own=True)
             sent += 1
@@ -173,7 +207,10 @@ class Bot:
         self.sent = [s for s in self.sent if now - s[0] < 3600]
         if now - self.last_reply.get(name, 0) < float(ch["cooldown_s"]):
             return "cooldown"
-        if sum(1 for s in self.sent if s[1] == name) >= int(ch["max_replies_per_hour"]):
+        if ch.get("dm"):
+            if sum(1 for s in self.sent if is_dm(s[1])) >= int(ch["max_replies_per_hour"]):
+                return "dm_hourly_cap"
+        elif sum(1 for s in self.sent if s[1] == name) >= int(ch["max_replies_per_hour"]):
             return "channel_hourly_cap"
         if sum(1 for s in self.sent if s[2].lower() == sender.lower()) >= int(ch["per_sender_per_hour"]):
             return "sender_hourly_cap"
@@ -188,8 +225,8 @@ class Bot:
     # ---------- used by the web UI (never transmit unless named so) ----------
     async def playground(self, channel: str, thread: list[dict], prompt_override: str | None = None,
                          overrides: dict | None = None) -> dict:
-        ch = self.cfg.channel_by_name(channel) or {**self.cfg.channel_defaults(), "name": channel}
-        ch = {**ch, **(overrides or {})}
+        ch = self.conversation(channel) or {**self.cfg.channel_defaults(), "name": channel}
+        ch = {**ch, **(overrides or {}), "_dry_run": True}  # tools never transmit adverts from here
         now = time.time()
         msgs = [Msg(i, channel, t.get("ts") or now - (len(thread) - i) * 30, t["sender"], t["text"],
                     bool(t.get("own")), hops=t.get("hops")) for i, t in enumerate(thread)]
@@ -201,7 +238,7 @@ class Bot:
                "searches": d.searches, "model": d.model, "fallback": d.fallback, "attempts": d.attempts}
         if d.respond and not d.error:
             res.update(await self.fit_reply(ch, d.parts))
-            res["bytes"] = [blen(f"{self.cfg.bot_name}: {p}") for p in res["parts"]]
+            res["bytes"] = [blen(p if ch.get("dm") else f"{self.cfg.bot_name}: {p}") for p in res["parts"]]
         return res
 
     async def replay(self, decision_id: int, prompt_override: str | None = None) -> dict:
@@ -224,6 +261,59 @@ class Bot:
         if not n:
             raise RuntimeError("send failed (companion not connected?)")
         return {"sent": text}
+
+    # ---------- adverts ----------
+    def last_advert(self) -> tuple[float, str]:
+        return float(self.state.get("last_advert") or 0), str(self.state.get("last_advert_source") or "")
+
+    async def advertise(self, source: str) -> dict:
+        """Send our advert now (the one place all triggers go through). Raises on failure."""
+        flood = bool(self.cfg.value("advert.flood"))
+        try:
+            await self.mesh.send_advert(flood)
+        except Exception as e:
+            self.adverts.append((time.time(), source, flood, str(e)[:200]))
+            log.warning("advert (%s) failed: %s", source, e)
+            raise
+        now = time.time()
+        self.state.update(last_advert=now, last_advert_source=source)
+        self._save_state()
+        self.adverts.append((now, source, flood, None))
+        log.info("advert sent (%s, %s)", "flood" if flood else "zero-hop", source)
+        return {"sent": True, "flood": flood, "source": source}
+
+    async def request_advert(self, ch: dict) -> tuple[str, dict]:
+        """The send_advert model tool: rate-limited, and a dry run outside live mode."""
+        last, _ = self.last_advert()
+        gap = float(self.cfg.value("advert.request_min_interval_min")) * 60
+        ago = time.time() - last
+        if last and ago < gap:
+            raise T.ToolError(f"an advert went out {round(ago / 60)} min ago; the next one can be requested in "
+                              f"{max(1, round((gap - ago) / 60))} min")
+        if ch.get("_dry_run") or ch.get("mode") != "live":
+            return "Advert would be sent now (shadow/test mode: nothing transmitted).", {"action": True,
+                                                                                         "dry_run": True}
+        if not self.cfg.enabled:
+            raise T.ToolError("transmitting is switched off by the operator right now")
+        try:
+            await self.advertise("request " + str(ch.get("name") or ""))
+        except Exception as e:
+            raise T.ToolError(f"advert failed: {e}")
+        return "Advert sent.", {"action": True}
+
+    async def advert_loop(self) -> None:
+        """Advert every advert.interval_h hours. The last time is kept in state.json, so restarts don't repeat it."""
+        await asyncio.sleep(30)  # let the companion connect
+        while True:
+            try:
+                self.cfg.reload()
+                every = float(self.cfg.value("advert.interval_h")) * 3600
+                last, _ = self.last_advert()
+                if every > 0 and self.cfg.enabled and self.mesh.connected and time.time() - last >= every:
+                    await self.advertise("scheduled")
+            except Exception as e:
+                log.debug("scheduled advert skipped: %s", e)
+            await asyncio.sleep(300)
 
     def model_health(self) -> list[dict]:
         """Every model any channel uses (primary/fallback), with failover state."""
@@ -273,6 +363,14 @@ class Bot:
                           "radio_recent": [{"ts": r[0], "kind": r[1], "node": r[2], "outcome": r[3]}
                                            for r in list(self.meshtools.radio_log)[-5:]]},
             "channels": chans,
+            "direct": {"mode": self.cfg.value("direct.mode"),
+                       "replies_last_hour": sum(1 for s in self.sent if is_dm(s[1])),
+                       "conversations": self.history.dm_conversations()},
+            "advert": {"last": self.last_advert()[0] or None, "last_source": self.last_advert()[1],
+                       "interval_h": float(self.cfg.value("advert.interval_h")),
+                       "flood": bool(self.cfg.value("advert.flood")),
+                       "recent": [{"ts": a[0], "source": a[1], "flood": a[2], "error": a[3]}
+                                  for a in list(self.adverts)[-5:]]},
             "last_24h": self.history.counts(now - 86400),
         }
 
@@ -297,7 +395,7 @@ class Bot:
         from .web import start_web
         log.info("meshbot starting as '%s'", self.cfg.bot_name)
         await start_web(self)
-        await asyncio.gather(self.mesh.run(), self.heartbeat(), self.prune())
+        await asyncio.gather(self.mesh.run(), self.heartbeat(), self.prune(), self.advert_loop())
 
 
 def main() -> None:

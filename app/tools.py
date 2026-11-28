@@ -358,6 +358,11 @@ DEFS = {
             "required": []}},
 }
 
+DEFS["send_advert"] = {
+    "description": "Broadcast the bot's advert now, so nodes can add it as a contact and DM it. Only when someone "
+                   "asks for an advert. Rate-limited.",
+    "parameters": {"type": "object", "properties": {}}}
+
 MESH_TOOLS = ("mesh_node", "mesh_nodes", "mesh_overview", "mesh_hops", "repeater_status", "repeater_neighbors")
 
 
@@ -371,6 +376,8 @@ def enabled_tools(channel: dict) -> list[str]:
         names.append("callsign_lookup")
     if channel.get("mesh_data"):
         names += list(MESH_TOOLS)
+    if channel.get("advert_requests"):
+        names.append("send_advert")
     return names
 
 

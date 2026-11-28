@@ -60,6 +60,34 @@ CHANNEL_FIELDS = [
     F("radio_queries", "bool", "Radio queries", False,
       "Also let it transmit: log in to a named repeater as guest for its neighbors/status, and run live path "
       "discovery. Uses airtime; capped in Settings > Mesh data. Needs Mesh data tools on."),
+    F("advert_requests", "bool", "Advert on request", True,
+      "Let people ask the bot to send an advert (so their node learns it and can DM it). Rate-limited in "
+      "Settings > Adverts. Not sent in shadow mode."),
+]
+
+# Direct messages: one profile for every sender. Same meaning as the channel fields; blank model = Settings > Model.
+DIRECT_FIELDS = [
+    F("mode", "choice", "Mode", "shadow",
+      "live = answer DMs. shadow = decide and log, never transmit. off = ignore DMs. DMs are always answered "
+      "(no eagerness), subject to the caps below.", choices=["live", "shadow", "off"]),
+    F("model", "model", "Primary model", "", "Blank = Settings > Model."),
+    F("fallback_model", "model", "Fallback model", "", "Blank = Settings > Model; 'none' = no fallback."),
+    F("max_parts", "int", "Max parts per reply", 3, "Most messages one answer may use.", 1, 6),
+    F("packet_text_bytes", "int", "Message size (bytes)", 150,
+      "Bytes of text per DM (MeshCore's limit is 160). No name prefix in DMs.", 60, 160),
+    F("debounce_s", "float", "Debounce (s)", 2, "Wait this long after the last message before thinking.", 0, 120),
+    F("part_gap_s", "float", "Gap between parts (s)", 4, "Pause between parts of one answer.", 0, 120),
+    F("cooldown_s", "float", "Cooldown (s)", 3, "Minimum time between replies to one sender.", 0, 3600),
+    F("max_replies_per_hour", "int", "Max DM replies / hour", 30, "All senders together.", 0, 1000),
+    F("per_sender_per_hour", "int", "Max replies / sender / hour", 10, "", 0, 1000),
+    F("history", "int", "Context messages", 20, "Recent messages of that conversation sent to the model.", 1, 200),
+    F("history_max_age_h", "float", "Context max age (h)", 12, "", 0.1, 720),
+    F("web_search", "bool", "Web search + read pages", False, ""),
+    F("weather", "bool", "Weather tool", True, ""),
+    F("callsign_lookup", "bool", "Callsign lookup", True, ""),
+    F("mesh_data", "bool", "Mesh data tools", False, ""),
+    F("radio_queries", "bool", "Radio queries", False, "Needs Mesh data tools on."),
+    F("advert_requests", "bool", "Advert on request", True, ""),
 ]
 
 SECTIONS = [
@@ -127,6 +155,15 @@ SECTIONS = [
           "Repeat questions about the same repeater reuse the last answer instead of transmitting again.", 0, 86400),
         F("default_guest_password", "str", "Default guest password", "",
           "Tried when a repeater has no password of its own in Secrets > Repeater guest passwords. Usually blank."),
+    ]},
+    {"id": "direct", "title": "Direct messages", "prefix": "direct", "fields": DIRECT_FIELDS},
+    {"id": "advert", "title": "Adverts", "prefix": "advert", "fields": [
+        F("interval_h", "float", "Advert every (h)", 48,
+          "Send an advert this often so nodes can find the bot and DM it. 0 = never on a schedule.", 0, 720),
+        F("flood", "bool", "Flood adverts", True,
+          "On = relayed across the mesh. Off = zero-hop, only nodes that hear the repeater directly."),
+        F("request_min_interval_min", "float", "Min time between requested adverts (min)", 30,
+          "When someone asks for an advert over the mesh. The Dashboard button ignores this.", 1, 1440),
     ]},
     {"id": "home_assistant", "title": "Home Assistant (LiteLLM MCP)", "prefix": "home_assistant", "fields": [
         F("mcp_server", "str", "MCP server name", "",

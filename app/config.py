@@ -188,6 +188,16 @@ class Config:
     def channel_by_name(self, name: str) -> dict | None:
         return next((c for c in self.channels() if c["name"].lower() == name.lower()), None)
 
+    def dm_profile(self, sender: str) -> dict:
+        """A channel-shaped settings dict for a direct-message conversation ("@<sender>")."""
+        prof = self.channel_defaults()
+        prof.update(self.section("direct"))
+        for k in ("model", "fallback_model"):
+            prof[k] = prof[k] or None
+        prof.update({"name": dm_name(sender), "slot": None, "dm": True, "sender": sender, "eagerness": "high",
+                     "home_assistant": "off", "overrides": []})
+        return prof
+
     def ignored(self, sender: str) -> bool:
         return sender.lower() in {str(n).lower() for n in self.value("ignore_senders") or []}
 
@@ -311,6 +321,8 @@ def validate(data: dict) -> None:
         name, slot = str(ch.get("name") or "").strip(), ch.get("slot")
         if not name or slot is None:
             raise ValueError(f"channel needs name and slot: {ch}")
+        if name.startswith("@"):
+            raise ValueError(f"channel name {name} can't start with @ (reserved for direct messages)")
         if len(name.encode()) > 31:
             raise ValueError(f"channel name {name} too long (31 bytes max)")
         if not 0 <= int(slot) <= 39:
@@ -326,7 +338,18 @@ def validate(data: dict) -> None:
                 coerce(channel_field(k), ch[k])
 
 
+def dm_name(sender: str) -> str:
+    """History/conversation name for DMs with one sender. Channels can't start with '@'."""
+    return "@" + str(sender).strip()
+
+
+def is_dm(name: str) -> bool:
+    return str(name).startswith("@")
+
+
 def prompt_slug(name: str) -> str:
+    if is_dm(name):
+        return "direct-messages"  # one notes file for every DM conversation
     return SLUG_RE.sub("", name.lower().lstrip("#")) or "channel"
 
 

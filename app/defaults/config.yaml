@@ -22,6 +22,13 @@ defaults:                # every channel uses these unless it overrides them
 tools:
   weather_location: ""   # default place for weather questions: "City, ST" or a ZIP
 
+direct:                  # direct messages to the bot (one thread per sender; always answered)
+  mode: shadow           # live = reply | shadow = decide + log only | off = ignore DMs
+
+advert:
+  interval_h: 48         # send the bot's advert this often so nodes can DM it (0 = only on request)
+  flood: true            # false = zero-hop (direct neighbors only)
+
 ignore_senders: []       # other bots on your mesh, so they can't loop with this one
 
 # Hashtag channels (#name) derive their key from the name. Private channels (any other name) need a secret:

@@ -79,10 +79,10 @@ def blocked_call(args: dict, blocked_services) -> str | None:
 
 
 def channel_mode(channel: dict | None) -> str:
-    """Home Assistant access for a channel. Hashtag channels never get any: anyone can join them by name."""
+    """Home Assistant access for a channel. Hashtag channels never get any (anyone can join them by name), nor DMs."""
     ch = channel or {}
-    if str(ch.get("name") or "").startswith("#"):
-        return "off"
+    if str(ch.get("name") or "").startswith(("#", "@")) or ch.get("dm"):
+        return "off"  # hashtag channels: anyone can join; DMs: off by design
     mode = str(ch.get("home_assistant") or "off")
     return mode if mode in MODES else "off"
 

@@ -25,6 +25,8 @@ class Incoming:
     snr: float | None
     hops: int | None
     live: bool  # False while draining the companion's queued backlog after connect
+    dm: bool = False               # a direct message to the bot (slot is then -1)
+    sender_key: str | None = None  # DMs: sender's public key prefix (hex), where replies go
 
 
 class Mesh:
@@ -94,7 +96,12 @@ class Mesh:
             else:
                 self.channel_status[ch["name"]] = "ok"
                 log.info("channel %s -> slot %s (%s)", ch["name"], ch["slot"], "private" if secret else "hashtag")
+        try:
+            await mc.ensure_contacts()  # names for incoming DMs (they only carry a key prefix)
+        except Exception as e:
+            log.warning("could not load contacts: %s", e)
         mc.subscribe(EventType.CHANNEL_MSG_RECV, self._on_channel_msg)
+        mc.subscribe(EventType.CONTACT_MSG_RECV, self._on_direct_msg)
         mc.subscribe(EventType.DISCONNECTED, lambda _e: self._lost.set())
         self.connected_at = time.time()
         await mc.start_auto_message_fetching()
@@ -158,6 +165,63 @@ class Mesh:
             await self.on_message(msg)
         except Exception:
             log.exception("message handler failed")
+
+    async def contact_name(self, prefix: str) -> str:
+        """Name for a DM sender's key prefix: contact cache, then one refresh, else 'node <prefix>'."""
+        mc = self.mc
+        for attempt in range(2):
+            c = mc.get_contact_by_key_prefix(prefix) if mc else None
+            if c and c.get("adv_name"):
+                return str(c["adv_name"]).strip()
+            if attempt == 0 and mc:
+                try:
+                    await mc.commands.get_contacts()
+                except Exception as e:
+                    log.debug("contact refresh failed: %s", e)
+        return f"node {prefix[:8]}"
+
+    async def _on_direct_msg(self, event) -> None:
+        p = event.payload or {}
+        if p.get("txt_type", 0) != 0:  # CLI commands / signed data, not chat
+            return
+        prefix = str(p.get("pubkey_prefix") or "")
+        if not prefix:
+            return
+        hops = p.get("path_len")
+        msg = Incoming(slot=-1, sender=await self.contact_name(prefix), text=str(p.get("text", "")).strip(),
+                       sender_ts=p.get("sender_timestamp"), snr=p.get("SNR"),
+                       hops=hops if isinstance(hops, int) and hops < 255 else None,
+                       live=time.time() - self.connected_at > BACKLOG_GRACE_S, dm=True, sender_key=prefix)
+        try:
+            await self.on_message(msg)
+        except Exception:
+            log.exception("DM handler failed")
+
+    async def send_dm(self, key_prefix: str, text: str) -> bool:
+        """Send a direct message, waiting for the ACK (retries, then flood). True when acknowledged."""
+        async with self._send_lock:
+            if not self.connected:
+                log.warning("not connected, dropping DM")
+                return False
+            try:
+                r = await self.mc.commands.send_msg_with_retry(key_prefix, text)
+            except Exception as e:
+                log.warning("DM to %s failed: %s", key_prefix[:8], e)
+                return False
+            if r is None or r.type == EventType.ERROR:
+                log.warning("DM to %s not acknowledged: %s", key_prefix[:8], None if r is None else r.payload)
+                return False
+            self.sent_count += 1
+            return True
+
+    async def send_advert(self, flood: bool) -> None:
+        async with self._send_lock:
+            if not self.connected:
+                raise RuntimeError("companion not connected")
+            r = await self.mc.commands.send_advert(flood=flood)
+            if r is None or r.type == EventType.ERROR:
+                raise RuntimeError(f"companion refused advert: {None if r is None else r.payload}")
+            self.sent_count += 1
 
     async def send(self, slot: int, text: str) -> bool:
         async with self._send_lock:

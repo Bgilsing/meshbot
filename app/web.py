@@ -98,6 +98,7 @@ def J(data, status=200):
 
 # ---------- handlers ----------
 routes = web.RouteTableDef()
+DM_NOTES = "@direct messages"  # Prompts tab entry; any "@..." name maps to prompts/channels/direct-messages.md
 
 
 @routes.get("/")
@@ -255,6 +256,8 @@ async def get_prompts(request):
     for c in cfg.channels():
         p = cfg.prompt_path(c["name"])
         chans[c["name"]] = p.read_text() if p.exists() else ""
+    p = cfg.prompt_path(DM_NOTES)
+    chans[DM_NOTES] = p.read_text() if p.exists() else ""
     return J({"system": sys_p.read_text() if sys_p.exists() else "", "channels": chans})
 
 
@@ -263,7 +266,7 @@ async def put_prompt(request):
     cfg = request.app[BOT].cfg
     body = await request.json()
     which, text = str(body.get("which", "")), str(body.get("text", ""))
-    if which != "system" and not cfg.channel_by_name(which):
+    if which not in ("system", DM_NOTES) and not cfg.channel_by_name(which):
         raise KeyError("unknown channel")
     path = cfg.prompt_path(which)
     if which != "system" and not text.strip():
@@ -405,6 +408,12 @@ async def models(request):
         return J({"models": await request.app[BOT].brain.models()})
     except Exception as e:
         return J({"models": [], "error": f"{type(e).__name__}: {e}"[:300]})
+
+
+@routes.post("/api/advert")
+async def advert(request):
+    """Dashboard button: send an advert now (admin action, ignores the request rate limit)."""
+    return J(await request.app[BOT].advertise("dashboard"))
 
 
 @routes.post("/api/rename_companion")

@@ -46,8 +46,9 @@ def clean(text: str, bot_name: str = "") -> str:
     return t
 
 
-def part_budget(packet_text_bytes: int, bot_name: str, n_parts: int) -> int:
-    b = packet_text_bytes - blen(bot_name) - 2
+def part_budget(packet_text_bytes: int, bot_name: str, n_parts: int, prefix: bool = True) -> int:
+    """Text bytes per part. prefix=False for DMs, which carry no "Name: " in the text."""
+    b = packet_text_bytes - (blen(bot_name) + 2 if prefix else 0)
     if n_parts > 1:
         b -= blen(f" {n_parts}/{n_parts}")
     return b
@@ -107,7 +108,7 @@ class Fit:
 
 
 def fit(raw_parts: list[str], bot_name: str, packet_text_bytes: int, max_parts: int,
-        allow_truncate: bool = True) -> Fit:
+        allow_truncate: bool = True, prefix: bool = True) -> Fit:
     parts = [p for p in (clean(x, bot_name) for x in raw_parts or []) if p]
     if not parts:
         return Fit()
@@ -116,14 +117,14 @@ def fit(raw_parts: list[str], bot_name: str, packet_text_bytes: int, max_parts: 
 
     # 1) Keep the model's own split if it fits as-is.
     n = len(parts)
-    if n <= max_parts and all(blen(p) <= part_budget(packet_text_bytes, bot_name, n) for p in parts):
+    if n <= max_parts and all(blen(p) <= part_budget(packet_text_bytes, bot_name, n, prefix) for p in parts):
         chunks = parts
     else:
         res.resplit = True
         text = " ".join(parts)
         chunks = None
         for k in range(1, max_parts + 1):
-            c = split_text(text, part_budget(packet_text_bytes, bot_name, k))
+            c = split_text(text, part_budget(packet_text_bytes, bot_name, k, prefix))
             if len(c) <= k:
                 chunks = c
                 break
@@ -131,7 +132,7 @@ def fit(raw_parts: list[str], bot_name: str, packet_text_bytes: int, max_parts: 
             res.overflow = True
             if not allow_truncate:
                 return res
-            b = part_budget(packet_text_bytes, bot_name, max_parts)
+            b = part_budget(packet_text_bytes, bot_name, max_parts, prefix)
             c = split_text(text, b)[:max_parts]
             c[-1] = _shorten_last(c[-1], b)
             chunks, res.truncated = c, True

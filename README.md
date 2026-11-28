@@ -19,6 +19,10 @@ LoRa radio <-> openHop repeater --(companion protocol, TCP 127.0.0.1:5070)--> me
 - **Mesh-sized answers.** Byte budgets in UTF-8 include the `Name: ` prefix and ` 1/3` markers. Answers that are
   too long get one shorten re-ask, then a clean cut.
 - **Hashtag and private channels**, with join QR codes (`meshcore://channel/add`) for the MeshCore app.
+- **Direct messages:** people can DM the bot. Every DM gets an answer, each sender has their own thread, and DMs
+  have their own settings (mode, models, tools, caps).
+- **Adverts** every 48 h (configurable), from a Dashboard button, or when a mesh user asks for one, so nodes can
+  find the bot and DM it.
 - **Model failover.** Each channel has a primary model (e.g. a fast cloud model) and a fallback (e.g. a local
   model). If the primary is unreachable, the fallback answers and is told the internet may be down.
 - **Tools**, switched per channel:
@@ -29,6 +33,7 @@ LoRa radio <-> openHop repeater --(companion protocol, TCP 127.0.0.1:5070)--> me
     [CoreScope](https://github.com/kpa-clawbot/corescope) and openHop
   - radio queries: guest login to a repeater for its neighbors or status, and live path discovery
   - Home Assistant (read or control, private channels only)
+  - send an advert on request (rate-limited)
 - **Web UI** with a live message log, a decision log with replay against new prompts, a playground, a prompt editor,
   channel management, and settings, including secrets.
 - **Guards** against bot loops and spam: cooldowns, hourly caps per channel and per sender, an ignore list, and a
@@ -65,13 +70,13 @@ LoRa radio <-> openHop repeater --(companion protocol, TCP 127.0.0.1:5070)--> me
 ## Web UI
 | Tab | What it's for |
 |---|---|
-| Dashboard | Transmit kill switch; companion, model and mesh-data health; per-channel modes; send a message by hand |
+| Dashboard | Transmit kill switch; companion, model and mesh-data health; per-channel and DM modes; send an advert; send a message by hand |
 | Live | Every message heard and sent. The badge shows what the bot decided; click it to see why |
 | Decisions | Every model call, filterable. Replay up to 20 against the current or a draft prompt |
 | Playground | Try a made-up conversation: the decision, the packets with byte counts, the tools used, the exact prompt |
 | Prompts | System prompt and per-channel notes; drafts can be tested before saving |
 | Channels | Channels, slots, private secrets (set or generate), join QR codes, per-channel overrides |
-| Settings | Secrets (API keys, web password, guest passwords), models, tools, mesh data, Home Assistant, defaults |
+| Settings | Secrets (API keys, web password, guest passwords), models, tools, mesh data, direct messages, adverts, Home Assistant, defaults |
 | Advanced | Raw config.yaml editor (validated before saving) and the live log |
 
 Changes apply on the next message, without a restart. Changing channels or the companion settings reconnects
@@ -83,6 +88,7 @@ the companion on its own.
 - `data/secrets.json` (mode 600): API keys, repeater guest passwords, the hashed web password and private channel
   keys set from the UI.
 - `data/history.db`: messages and decisions. `data/decisions.jsonl` is a copy of the decisions for `jq`.
+- `data/state.json`: when the last advert went out.
 - `.env`: host settings, plus optional `LITELLM_API_KEY`, `OPENHOP_API_KEY`, `WEB_PASSWORD` and `secret_env`
   values. Anything set in the UI wins.
 - `app/schema.py`: every setting, declared once. The UI forms and validation are generated from it, so adding a
@@ -99,6 +105,25 @@ CLI replay: `docker compose exec meshbot python -m app.replay --last 20 --change
 - **Renaming:** change Bot name in Settings, then press "Rename companion" on the Dashboard so the companion matches.
 - **One client per companion port:** never point a second meshbot (a test copy) at the same companion port. It
   knocks the running bot off and writes its own channels into the companion's slots.
+
+### Direct messages
+- DMs arrive through the same companion. Each sender is a conversation named `@<their node name>`, shown in Live,
+  Decisions and the Playground. Settings > Direct messages has its own mode (starts in `shadow`), models, tools and
+  caps. Home Assistant is never offered in DMs.
+- The bot always answers a DM. If the model chooses silence, it is asked once more. The kill switch, shadow mode,
+  `ignore_senders`, cooldown and hourly caps still apply.
+- Replies wait for the recipient's ACK, retrying and then flooding. A reply that is never acknowledged is logged as
+  `send_failed`.
+- MeshCore can only decrypt a DM from a node whose advert the companion has heard, and the sender needs the bot's
+  advert to DM it. Adverts take care of the second part.
+- Prompt notes for every DM conversation live in Prompts > "Notes for direct messages".
+
+### Adverts
+- **Scheduled:** every `advert.interval_h` hours (default 48, flood). The time of the last advert is kept in
+  `data/state.json`, so restarts don't send extra ones. The kill switch pauses the schedule.
+- **On request:** the `send_advert` tool, switched per channel and for DMs with "Advert on request". It is limited to
+  one per `request_min_interval_min`, and in shadow mode or the Playground it only reports what it would do.
+- **Dashboard:** "Send advert" sends one right away and skips the request limit.
 
 ### Failover
 Blank model fields use Settings > Model, and `none` turns a channel's fallback off. The primary gets

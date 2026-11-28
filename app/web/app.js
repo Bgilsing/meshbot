@@ -47,10 +47,14 @@ function closeModal() { $("#modal").classList.add("hidden"); }
 $("#modal-x").onclick = closeModal;
 $("#modal").addEventListener("click", e => { if (e.target.id === "modal") closeModal(); });
 function channelNames() { return (state.settings?.channels || []).map(c => c.name); }
-function channelSelect(value, { all = false, onchange } = {}) {
+function dmNames() { return state.status?.direct?.conversations || []; }
+async function loadDMs() { try { state.status = await api("GET", "/api/status"); } catch (e) { /* keep old */ } }
+function channelSelect(value, { all = false, onchange, dm = false, extra = [] } = {}) {
   const s = h("select", { onchange });
   if (all) s.append(h("option", { value: "" }, "All channels"));
   for (const n of channelNames()) s.append(h("option", { value: n }, n));
+  if (dm) for (const n of [...new Set([...dmNames(), ...extra])]) s.append(h("option", { value: n }, `${n} (DM)`));
+  if (value && ![...s.options].some(o => o.value === value)) s.append(h("option", { value }, value));
   if (value !== undefined) s.value = value;
   return s;
 }
@@ -99,6 +103,27 @@ const inheritOf = (f, vals) => vals[f.inherit_from || "defaults." + f.key];
 const fmtVal = v => Array.isArray(v) ? v.join(", ") : String(v);
 
 // Mesh data card: source health, radio query budget and the last few transmitting queries.
+function directCard(s) {
+  const d = s.direct || {}, a = s.advert || {};
+  const sel = h("select", { onchange: async e => {
+    await api("POST", "/api/settings", { values: { "direct.mode": e.target.value } });
+    toast(`Direct messages: ${e.target.value}`); e.target.blur(); } },
+    ...["live", "shadow", "off"].map(m => h("option", { value: m }, m)));
+  sel.value = d.mode || "shadow";
+  return h("div", { class: "card" }, h("h2", {}, "Direct messages & adverts"),
+    h("div", { class: "kv" },
+      h("div", {}, "DM mode"), h("div", {}, sel),
+      h("div", {}, "DM replies"), h("div", {}, `${d.replies_last_hour || 0} this hour · ${(d.conversations || []).length} conversations (30 d)`),
+      h("div", {}, "Last advert"), h("div", {}, a.last ? `${ago(a.last)} (${a.last_source})` : "none yet"),
+      h("div", {}, "Schedule"), h("div", {}, a.interval_h ? `every ${a.interval_h} h, ${a.flood ? "flood" : "zero-hop"}` : "off")),
+    ...(a.recent || []).filter(r => r.error).slice(-2).map(r => h("div", { class: "small", style: "color:var(--bad)" }, `${ago(r.ts)}: ${r.error}`)),
+    h("div", { class: "row", style: "margin-top:6px" }, h("button", { onclick: async e => {
+      if (!confirm(`Send a ${a.flood ? "flood" : "zero-hop"} advert now?`)) return;
+      e.target.disabled = true;
+      try { await api("POST", "/api/advert"); toast("Advert sent"); } finally { e.target.disabled = false; } } }, "Send advert"),
+      h("span", { class: "muted small" }, "Nodes need the bot's advert before they can DM it.")));
+}
+
 function meshCard(m) {
   if (!m) return "";
   const out = h("div", { class: "muted small" });
@@ -182,6 +207,7 @@ TABS.dashboard = async main => {
             } finally { e.target.disabled = false; e.target.textContent = "Test models"; draw(true); } } }, "Test models"),
             h("span", { class: "muted small" }, "A passing test also ends a failover hold."))),
         meshCard(s.mesh_data),
+        directCard(s),
         h("div", { class: "card" }, h("h2", {}, "Last 24 hours"),
           h("div", { class: "kv" },
             h("div", {}, "Heard"), h("div", {}, s.last_24h.heard),
@@ -251,7 +277,8 @@ function updateHeader(s) {
 // ----- Live -----
 TABS.live = async main => {
   await loadSettings();
-  const filter = channelSelect(state.liveChannel ?? "", { all: true, onchange: () => { state.liveChannel = filter.value; reset(); } });
+  await loadDMs();
+  const filter = channelSelect(state.liveChannel ?? "", { all: true, dm: true, onchange: () => { state.liveChannel = filter.value; reset(); } });
   const list = h("div", { class: "feed" });
   const empty = h("div", { class: "muted", style: "padding:8px" }, "Nothing heard yet.");
   const more = h("button", { onclick: () => loadOlder() }, "Load older");
@@ -356,7 +383,8 @@ function packetsView(parts) {
 // ----- Decisions -----
 TABS.decisions = async main => {
   await loadSettings();
-  const chan = channelSelect("", { all: true, onchange: () => reload() });
+  await loadDMs();
+  const chan = channelSelect("", { all: true, dm: true, onchange: () => reload() });
   const outcome = h("select", { onchange: () => reload() }, h("option", { value: "" }, "All outcomes"),
     ...["sent", "shadow", "silent", "blocked", "superseded", "disabled", "error"].map(o => h("option", { value: o }, o)));
   const search = h("input", { type: "text", placeholder: "Search text...", onkeydown: e => { if (e.key === "Enter") reload(); } });
@@ -432,7 +460,8 @@ TABS.playground = async main => {
   await loadSettings();
   if (!state.schema) state.schema = await api("GET", "/api/schema");
   const pg = state.pg || { channel: channelNames()[0] || "#testbot", thread: "Alice: anyone know how far LoRa can reach?" };
-  const chan = channelNames().length ? channelSelect(pg.channel) : h("input", { type: "text", value: pg.channel });
+  await loadDMs();
+  const chan = channelSelect(pg.channel, { dm: true, extra: ["@Tester"] });
   const thread = h("textarea", { rows: 10 }); thread.value = pg.thread;
   thread.oninput = () => { state.pg = { channel: chan.value, thread: thread.value }; };
   const ov = {};
@@ -491,7 +520,7 @@ TABS.prompts = async main => {
   await loadSettings();
   const saved = await api("GET", "/api/prompts");
   const opts = ["system", ...Object.keys(saved.channels)];
-  const pick = h("select", {}, ...opts.map(o => h("option", { value: o }, o === "system" ? "System prompt (all channels)" : `Notes for ${o}`)));
+  const pick = h("select", {}, ...opts.map(o => h("option", { value: o }, o === "system" ? "System prompt (all channels)" : o.startsWith("@") ? "Notes for direct messages (all DMs)" : `Notes for ${o}`)));
   pick.value = state.promptPick && opts.includes(state.promptPick) ? state.promptPick : "system";
   const ta = h("textarea", { style: "min-height:420px" });
   const info = h("div", { class: "muted small" });
