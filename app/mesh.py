@@ -290,27 +290,30 @@ class Mesh:
         return c
 
     async def login(self, pubkey: str, password: str, timeout: float, attempts: int = 3) -> dict:
-        """Log in to a repeater/room. Returns the LOGIN_SUCCESS payload; raises on refusal or when no attempt was
-        answered within `timeout` seconds in total.
+        """Log in to a repeater/room. Returns the LOGIN_SUCCESS payload; raises when no attempt succeeded within
+        `timeout` seconds in total.
 
         Like a phone does, it retries: a busy repeater misses logins (collisions with other traffic are common).
         Every attempt first forgets the stored route and floods, because routes change (and a route learned under
-        another path-hash size is useless). The reply teaches the companion the current route for what follows."""
+        another path-hash size is useless). The reply teaches the companion the current route for what follows.
+
+        A LOGIN_FAILED event is never taken as final. The companion raises it for any RESPONSE from the node while
+        a login is pending, and late duplicate copies of an earlier reply (relayed by a slower repeater) do arrive
+        then; real firmware also ignores a wrong password silently rather than answering. So a "failed" only marks
+        the attempt; we keep waiting for the real reply and keep retrying."""
         mc = self._need()
         prefix = pubkey[:12]
-        ok = asyncio.ensure_future(mc.dispatcher.wait_for_event(EventType.LOGIN_SUCCESS,
-                                                                attribute_filters={"pubkey_prefix": prefix},
-                                                                timeout=timeout))
-        bad = asyncio.ensure_future(mc.dispatcher.wait_for_event(EventType.LOGIN_FAILED,
-                                                                 attribute_filters={"pubkey_prefix": prefix},
-                                                                 timeout=timeout))
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
         attempts = max(1, int(attempts))
+        ok = asyncio.ensure_future(mc.dispatcher.wait_for_event(EventType.LOGIN_SUCCESS,
+                                                                attribute_filters={"pubkey_prefix": prefix},
+                                                                timeout=timeout))
+        tries = rejected = 0
         try:
             for n in range(attempts):
                 left = deadline - loop.time()
-                if left <= 1:
+                if left <= 1 or ok.done():
                     break
                 try:
                     rp = await mc.commands.reset_path(pubkey)
@@ -321,23 +324,38 @@ class Mesh:
                 r = await mc.commands.send_login(pubkey, password)
                 if r is None or r.type == EventType.ERROR:
                     raise RuntimeError(f"login not sent: {None if r is None else r.payload}")
+                tries += 1
                 suggested = float((r.payload or {}).get("suggested_timeout") or 0) / 800  # ms, +25% like meshcore
                 # Split what's left over the remaining attempts, but give each at least the companion's estimate.
                 wait = min(left, max(suggested, left / (attempts - n)))
                 log.info("login %s attempt %d/%d (flood), waiting %.0fs", prefix[:8], n + 1, attempts, wait)
-                done, _ = await asyncio.wait({ok, bad}, timeout=wait, return_when=asyncio.FIRST_COMPLETED)
-                if ok in done and ok.result():
-                    return ok.result().payload
-                if bad in done and bad.result():
-                    raise PermissionError("login refused (wrong guest password?)")
-                if done:  # a waiter ended without an event (its own timeout)
-                    break
+                bad = asyncio.ensure_future(mc.dispatcher.wait_for_event(EventType.LOGIN_FAILED,
+                                                                         attribute_filters={"pubkey_prefix": prefix},
+                                                                         timeout=wait))
+                end = loop.time() + wait
+                try:
+                    while (rem := end - loop.time()) > 0:
+                        done, _ = await asyncio.wait({ok} if bad.done() else {ok, bad}, timeout=rem,
+                                                     return_when=asyncio.FIRST_COMPLETED)
+                        if ok in done:
+                            if ok.result():
+                                return ok.result().payload
+                            break  # the whole budget ran out
+                        if not done:
+                            break
+                        if bad.result():
+                            rejected += 1
+                            log.info("login %s attempt %d: got a 'login failed' (often a stray duplicate of an "
+                                     "earlier reply); still waiting for the real answer", prefix[:8], n + 1)
+                finally:
+                    bad.cancel()
                 await asyncio.sleep(random.uniform(0.5, 2.5))  # don't collide with someone else's retry again
         finally:
-            for t in (ok, bad):
-                t.cancel()
-        raise TimeoutError(f"no answer to {attempts} login attempts (repeater busy, out of range, or it needs a "
-                           "guest password)")
+            ok.cancel()
+        if tries and rejected >= tries:
+            raise PermissionError(f"the repeater rejected all {tries} login tries (it may need a guest password)")
+        raise TimeoutError(f"no login reply after {tries} tries (mesh busy, out of range, or it needs a guest "
+                           "password)")
 
     async def logout(self, pubkey: str) -> None:
         try:

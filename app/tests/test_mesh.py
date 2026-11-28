@@ -126,7 +126,7 @@ def test_login_gives_up_after_attempts(tmp_path, monkeypatch):
     m = mesh_with(tmp_path, "1", Cmds())
     m.mc = SimpleNamespace(commands=Cmds(), dispatcher=Disp(), is_connected=True)
     import pytest
-    with pytest.raises(TimeoutError, match="2 login attempts"):
+    with pytest.raises(TimeoutError, match="after 2 tries"):
         asyncio.run(m.login("cd" * 32, "", 2.5, attempts=2))
     assert calls == ["reset", "login", "reset", "login"]
 
@@ -161,3 +161,62 @@ def test_requests_retry_and_flood_on_last_try(tmp_path, monkeypatch):
     calls.clear()
     assert asyncio.run(m.status_req("ab" * 32, 2, attempts=2)) is None
     assert calls == ["status", "reset", "status"]
+
+
+def test_stray_login_failed_does_not_end_login(tmp_path, monkeypatch):
+    """A late duplicate of an earlier reply shows up as LOGIN_FAILED right after we send; the real LOGIN_SUCCESS
+    comes a few seconds later. That must count as logged in, not 'refused'."""
+    import app.mesh as mesh_mod
+    monkeypatch.setattr(mesh_mod.random, "uniform", lambda a, b: 0)
+    calls = []
+
+    class Cmds:
+        async def reset_path(self, key):
+            calls.append("reset")
+            return SimpleNamespace(type=EventType.OK, payload={})
+
+        async def send_login(self, key, pw):
+            calls.append("login")
+            return SimpleNamespace(type=EventType.MSG_SENT, payload={"suggested_timeout": 0})
+
+    class Disp:
+        async def wait_for_event(self, et, attribute_filters=None, timeout=None):
+            if et == EventType.LOGIN_FAILED:
+                await asyncio.sleep(0.05)
+                return SimpleNamespace(payload={})
+            await asyncio.sleep(0.4)
+            return SimpleNamespace(payload={"is_admin": False})
+
+    m = mesh_with(tmp_path, "1", Cmds())
+    m.mc = SimpleNamespace(commands=Cmds(), dispatcher=Disp(), is_connected=True)
+    assert asyncio.run(m.login("ab" * 32, "", 3, attempts=3)) == {"is_admin": False}
+    assert calls == ["reset", "login"]
+
+
+def test_login_rejected_every_time_is_reported(tmp_path, monkeypatch):
+    import app.mesh as mesh_mod
+    monkeypatch.setattr(mesh_mod.random, "uniform", lambda a, b: 0)
+    calls = []
+
+    class Cmds:
+        async def reset_path(self, key):
+            return SimpleNamespace(type=EventType.OK, payload={})
+
+        async def send_login(self, key, pw):
+            calls.append("login")
+            return SimpleNamespace(type=EventType.MSG_SENT, payload={"suggested_timeout": 0})
+
+    class Disp:
+        async def wait_for_event(self, et, attribute_filters=None, timeout=None):
+            if et == EventType.LOGIN_FAILED:
+                await asyncio.sleep(0.05)
+                return SimpleNamespace(payload={})
+            await asyncio.sleep(timeout)
+            return None
+
+    m = mesh_with(tmp_path, "1", Cmds())
+    m.mc = SimpleNamespace(commands=Cmds(), dispatcher=Disp(), is_connected=True)
+    import pytest
+    with pytest.raises(PermissionError, match="rejected all 2 login tries"):
+        asyncio.run(m.login("cd" * 32, "", 2.5, attempts=2))
+    assert calls == ["login", "login"]

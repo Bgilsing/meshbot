@@ -101,7 +101,8 @@ def tool_rules(channel: dict, max_calls: int) -> str:
     if "mesh_node" in names:
         radio = ("Radio queries are ON: naming a repeater in repeater_status/repeater_neighbors logs in to it "
                  "over the air, and mesh_hops live=true runs a path discovery. These use airtime, so only when "
-                 "asked." if channel.get("radio_queries") else
+                 "asked. If one fails, report exactly what the tool said (e.g. no reply after N tries) and offer "
+                 "a retry; never invent a cause such as permissions or a privilege level." if channel.get("radio_queries") else
                  "Radio queries are OFF here: named repeaters are answered from the network map only.")
         out.append("- Questions about the mesh itself (a node or repeater, who is up, last heard, hops, coverage, "
                    "neighbors, our repeater, network activity): you MUST use the mesh tools, never guess. "
