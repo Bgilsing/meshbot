@@ -348,6 +348,7 @@ function decisionView(d) {
     parts.length ? h("div", {}, h("h3", { style: "margin-top:12px" }, d.outcome === "sent" ? "Sent" : "Would have sent"), packetsView(parts)) : "",
     d.shortened ? h("div", { class: "muted small" }, "Answer was too long; the model was asked to shorten it.") : "",
     d.truncated ? h("div", { class: "muted small" }, "Still too long after shortening; it was cut off.") : "",
+    laterPages(d.later_pages),
     h("details", {}, h("summary", {}, "Raw model output"), h("pre", { class: "mono" }, d.raw || "")),
     h("div", { class: "row end", style: "margin-top:12px" },
       h("button", { onclick: () => { closeModal(); openInPlayground(d.channel, d.thread); } }, "Open in playground"),
@@ -500,6 +501,13 @@ TABS.playground = async main => {
     h("div", { class: "card" }, h("h2", {}, "Result"), out)));
 };
 
+function laterPages(pages) {
+  if (!pages || !pages.length) return "";
+  return h("details", { style: "margin-top:8px" },
+    h("summary", {}, `${pages.length} more batch${pages.length > 1 ? "es" : ""}, each sent when someone replies "more"`),
+    ...pages.map((p, i) => h("div", {}, h("div", { class: "muted small" }, `After "more" #${i + 1}`), packetsView(p))));
+}
+
 function resultView(r) {
   if (r.error) return h("div", {}, h("div", { style: "color:var(--bad)" }, r.error), h("div", { class: "small" }, modelLine(r)));
   return h("div", {},
@@ -510,6 +518,7 @@ function resultView(r) {
     r.respond ? packetsView(r.parts || []) : h("div", { class: "muted" }, "The bot would stay quiet."),
     r.shortened ? h("div", { class: "muted small" }, "Too long at first; the model shortened it.") : "",
     r.truncated ? h("div", { class: "muted small" }, "Still too long; it was cut off.") : "",
+    laterPages(r.later_pages),
     h("details", {}, h("summary", {}, "Raw model output"), h("pre", { class: "mono" }, r.raw || "")),
     r.system ? h("details", {}, h("summary", {}, "System prompt sent"), h("pre", { class: "mono" }, r.system)) : "",
     r.user ? h("details", {}, h("summary", {}, "User message sent"), h("pre", { class: "mono" }, r.user)) : "");

@@ -115,8 +115,9 @@ def test_live_reply_multi_part_and_history(tmp_path, monkeypatch):
 
 
 def test_overflow_triggers_shorten(tmp_path, monkeypatch):
+    """With 'more' paging off, an over-long answer gets one shorten re-ask."""
     brain = FakeBrain(lambda m: Decision(respond=True, reason="q", parts=["word " * 500]))
-    bot = make_bot(tmp_path, monkeypatch, brain)
+    bot = make_bot(tmp_path, monkeypatch, brain, {**CFG, "defaults": {**CFG["defaults"], "more_pages": 0}})
 
     async def go():
         await bot.on_message(msg("explain everything"))
@@ -124,6 +125,19 @@ def test_overflow_triggers_shorten(tmp_path, monkeypatch):
     run(go())
     assert brain.shortened == 1
     assert [t for _, t in bot.mesh.sent] == ["Short version."]
+
+
+def test_overflow_is_held_for_more_when_paging_is_on(tmp_path, monkeypatch):
+    brain = FakeBrain(lambda m: Decision(respond=True, reason="q", parts=[f"Fact {i} here." for i in range(60)]))
+    bot = make_bot(tmp_path, monkeypatch, brain)
+
+    async def go():
+        await bot.on_message(msg("explain everything"))
+        await asyncio.sleep(0.3)
+    run(go())
+    sent = [t for _, t in bot.mesh.sent]
+    assert brain.shortened == 0 and len(sent) == 3 and sent[0].startswith("Fact 0 here.")
+    assert sent[-1].endswith("(reply more)") and bot.pages["#testbot"]["pages"][1]
 
 
 def test_shadow_channel_never_transmits(tmp_path, monkeypatch):

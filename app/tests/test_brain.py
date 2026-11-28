@@ -34,8 +34,8 @@ def decide(b, cfg):
 def test_truncated_output_explains_token_limit(tmp_path):
     b, cfg, seen = make(tmp_path, {"thinking": True}, '{"respond": true,', finish="length")
     d = decide(b, cfg)
-    assert not d.respond and "ran out of tokens" in d.error and "thinking_max_tokens=4000" in d.error
-    assert seen["body"]["max_tokens"] == 4000
+    assert not d.respond and "ran out of tokens" in d.error and "thinking_max_tokens=10000" in d.error
+    assert seen["body"]["max_tokens"] == 10000
 
 
 def test_thinking_off_uses_max_tokens(tmp_path):

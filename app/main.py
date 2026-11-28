@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from collections import defaultdict, deque
 from datetime import datetime
@@ -11,7 +12,7 @@ from datetime import datetime
 import httpx
 
 from .brain import Brain, Decision
-from .compress import blen, clean, fit, part_budget
+from .compress import blen, clean, fit, paginate, part_budget
 from . import tools as T
 from .config import DATA, Config, atomic_write, bootstrap, is_dm, load_prompt
 from .history import History, Msg
@@ -22,6 +23,18 @@ log = logging.getLogger("meshbot")
 
 DECISIONS = DATA / "decisions.jsonl"
 STATE = DATA / "state.json"  # small runtime state that survives restarts (last advert)
+PAGES_TTL = 1800  # unsent pages of a long answer are dropped after this many seconds without a "more"
+
+
+def more_request(text: str, bot_name: str) -> int | None:
+    """None unless the message only asks for the next page: "more", "next", "@Bot more", "page 3"...
+    Returns 0 for "the next page", or the page number asked for."""
+    t = re.sub(r"^@?\[?" + re.escape(bot_name.lower()) + r"\]?[\s:,]*", "", (text or "").strip().lower())
+    m = re.fullmatch(r"(?:(?:more|next)(?: page)?(?: please)?|please more|continue|go on|page\s*(\d{1,2}))"
+                     r"[\s.!?]*", t)
+    if not m:
+        return None
+    return int(m.group(1)) if m.group(1) else 0
 
 
 def msg_dict(m: Msg) -> dict:
@@ -60,6 +73,7 @@ class Bot:
         self.logbuf: LogBuffer | None = None
         self.dm_keys: dict[str, str] = {}                  # "@Name" -> sender key prefix (where DM replies go)
         self.adverts: deque = deque(maxlen=10)             # (time, source, flood, error|None)
+        self.pages: dict[str, dict] = {}                   # name -> {"pages", "next", "ts"} of a long answer
         self.state = self._load_state()
         self.brain.advert_hook = self.request_advert
 
@@ -106,6 +120,10 @@ class Bot:
         old = self.timers.get(name)
         if old and not old.done():
             old.cancel()
+        page = self._page_wanted(name, inc.text)
+        if page is not None:  # "more": send the next held page, no model call
+            asyncio.create_task(self.next_page(name, m, page))
+            return
         self.timers[name] = asyncio.create_task(self._debounce(name, self.gen[name], float(ch["debounce_s"])))
 
     async def _debounce(self, name: str, gen: int, delay: float) -> None:
@@ -136,7 +154,8 @@ class Bot:
                    "model": d.model, "fallback": d.fallback, "attempts": d.attempts,
                    "trigger": {"id": trigger.id, "sender": trigger.sender, "text": trigger.text},
                    "thread": [msg_dict(m) for m in msgs],
-                   "respond": d.respond, "reason": d.reason, "parts_raw": d.parts, "raw": d.raw[:4000],
+                   "respond": d.respond, "reason": d.reason, "parts_raw": d.parts, "more_raw": d.more,
+                   "raw": d.raw[:4000],
                    "latency_s": d.latency_s, "usage": d.usage, "error": d.error, "searches": d.searches,
                    "web_search": bool(ch.get("web_search"))}
             try:
@@ -144,11 +163,21 @@ class Bot:
             finally:
                 self._log_decision(rec, trigger.id)
 
-    async def fit_reply(self, ch: dict, parts: list[str]) -> dict:
-        """Fit model output to packets, with one shorten re-ask if it overflows."""
+    async def fit_reply(self, ch: dict, parts: list[str], more: list[str] | None = None) -> dict:
+        """Fit model output to packets, with one shorten re-ask if it overflows. When the model handed over a
+        long answer (`more`) and paging is on, it is split into pages instead: out["pages"] holds them all and
+        out["parts"] the first."""
         bot, ptb, maxp = self.cfg.bot_name, int(ch["packet_text_bytes"]), int(ch["max_parts"])
         out: dict = {}
         prefix = not ch.get("dm")
+        npages = int(ch.get("more_pages") or 0)
+        if npages >= 2 and (more or fit(parts, bot, ptb, maxp, allow_truncate=False, prefix=prefix).overflow):
+            # Extra detail, or an answer that's too long: number it over the whole answer and hold the rest
+            # for "more" rather than shortening it (the model puts the most relevant facts first).
+            pages = paginate(parts + (more or []), bot, ptb, maxp, npages, prefix=prefix)
+            if len(pages) > 1:
+                return {"parts": pages[0], "pages": pages, "resplit": True, "truncated": False}
+        parts = parts + (more or [])
         f = fit(parts, bot, ptb, maxp, allow_truncate=False, prefix=prefix)
         if f.overflow:
             shorter = await self.brain.shorten(parts, ch)
@@ -168,10 +197,53 @@ class Bot:
             log.info("[%s] newer messages arrived while thinking; re-evaluating", name)
             return {"outcome": "superseded"}
 
-        out = await self.fit_reply(ch, d.parts)
+        out = await self.fit_reply(ch, d.parts, d.more)
+        pages = out.pop("pages", None)
+        if pages:
+            self.pages[name] = {"pages": pages, "next": 1, "ts": time.time()}
+            out["later_pages"] = pages[1:]
+        else:
+            self.pages.pop(name, None)  # a new answer replaces an older long one
+        return await self._deliver(name, ch, trigger, out, d.reason)
+
+    def _page_wanted(self, name: str, text: str) -> int | None:
+        """Index of the held page a "more" message asks for, or None (then the model handles the message)."""
+        p = self.pages.get(name)
+        if not p or time.time() - p["ts"] > PAGES_TTL:
+            return None
+        n = more_request(text, self.cfg.bot_name)
+        if n is None:
+            return None
+        idx = p["next"] if n == 0 else n - 1
+        return idx if 0 < idx < len(p["pages"]) else None
+
+    async def next_page(self, name: str, trigger: Msg, idx: int) -> None:
+        async with self.locks[name]:
+            self.cfg.reload()
+            ch = self.conversation(name)
+            p = self.pages.get(name)
+            if not ch or not p or idx >= len(p["pages"]):
+                return
+            p["next"], p["ts"] = idx + 1, time.time()
+            if p["next"] >= len(p["pages"]):
+                self.pages.pop(name, None)
+            total = len(p["pages"])
+            reason = f"batch {idx + 1}/{total} on request (no model call)"
+            rec = {"time": datetime.now().astimezone().isoformat(timespec="seconds"), "channel": name,
+                   "mode": ch.get("mode"), "eagerness": ch.get("eagerness"), "model": "", "fallback": False,
+                   "attempts": [], "trigger": {"id": trigger.id, "sender": trigger.sender, "text": trigger.text},
+                   "thread": [msg_dict(trigger)], "respond": True, "reason": reason, "parts_raw": [], "raw": "",
+                   "latency_s": 0, "usage": {}, "error": None, "searches": [], "page": [idx + 1, total]}
+            try:
+                rec.update(await self._deliver(name, ch, trigger, {"parts": list(p["pages"][idx])}, reason))
+            finally:
+                self._log_decision(rec, trigger.id)
+
+    async def _deliver(self, name: str, ch: dict, trigger: Msg, out: dict, reason: str) -> dict:
+        """Shadow/kill switch/caps, then transmit `out["parts"]`. Returns `out` with the outcome."""
         if ch.get("mode") != "live" or not self.cfg.enabled:
             why = "SHADOW" if ch.get("mode") != "live" else "DISABLED"
-            log.info("[%s] %s would send (%s): %s", name, why, d.reason, " | ".join(out["parts"]))
+            log.info("[%s] %s would send (%s): %s", name, why, reason, " | ".join(out["parts"]))
             out["outcome"] = "shadow" if ch.get("mode") != "live" else "disabled"
             return out
         blocked = self._guard(name, ch, trigger.sender)
@@ -233,11 +305,13 @@ class Bot:
         prompt = prompt_override if prompt_override is not None else load_prompt(channel, self.cfg.prompts_dir)
         d = await self.brain.decide(prompt, ch, msgs)
         self._track_llm(d)
-        res = {"respond": d.respond, "reason": d.reason, "parts_raw": d.parts, "raw": d.raw,
+        res = {"respond": d.respond, "reason": d.reason, "parts_raw": d.parts, "more_raw": d.more, "raw": d.raw,
                "latency_s": d.latency_s, "usage": d.usage, "error": d.error, "system": d.system, "user": d.user,
                "searches": d.searches, "model": d.model, "fallback": d.fallback, "attempts": d.attempts}
         if d.respond and not d.error:
-            res.update(await self.fit_reply(ch, d.parts))
+            res.update(await self.fit_reply(ch, d.parts, d.more))
+            if res.get("pages"):
+                res["later_pages"] = res.pop("pages")[1:]
             res["bytes"] = [blen(p if ch.get("dm") else f"{self.cfg.bot_name}: {p}") for p in res["parts"]]
         return res
 

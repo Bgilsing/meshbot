@@ -17,7 +17,8 @@ LoRa radio <-> openHop repeater --(companion protocol, TCP 127.0.0.1:5070)--> me
   prompts and per-channel notes are editable, and **shadow mode** lets a channel decide and log without
   transmitting.
 - **Mesh-sized answers.** Byte budgets in UTF-8 include the `Name: ` prefix and ` 1/3` markers. Answers that are
-  too long get one shorten re-ask, then a clean cut.
+  too long get one shorten re-ask, then a clean cut. Long lists are numbered over the whole answer (1/8 ... 8/8):
+  the first parts go out, and "more" sends the next ones.
 - **Hashtag and private channels**, with join QR codes (`meshcore://channel/add`) for the MeshCore app.
 - **Direct messages:** people can DM the bot. Every DM gets an answer, each sender has their own thread, and DMs
   have their own settings (mode, models, tools, caps).
@@ -105,6 +106,18 @@ CLI replay: `docker compose exec meshbot python -m app.replay --last 20 --change
 - **Renaming:** change Bot name in Settings, then press "Rename companion" on the Dashboard so the companion matches.
 - **One client per companion port:** never point a second meshbot (a test copy) at the same companion port. It
   knocks the running bot off and writes its own channels into the companion's slots.
+
+### Long answers ("more")
+- When someone asks for more than fits (every repeater heard today, a full neighbor list), the model hands over the
+  whole answer. The bot numbers its packets over the whole answer (1/8, 2/8 ... 8/8) and sends the first `max_parts`
+  of them; the last one sent ends with "(reply more)".
+- A reply of just "more", "next" or "more please" (optionally with the bot's name in front) sends the next
+  `max_parts` packets straight away, with no model call, until all are shown. Anyone in the conversation can ask.
+  Caps, cooldowns and shadow mode still apply.
+- "Batches for 'more'" (`more_pages`, per channel and for DMs, default 10) is the most batches one answer can hold
+  (10 x 3 = 30 packets); `0` turns this off, and then long answers are shortened as before. Unsent packets are
+  dropped after 30 minutes or when the bot gives a new answer in that conversation. Decisions and the Playground
+  show what's held.
 
 ### Direct messages
 - DMs arrive through the same companion. Each sender is a conversation named `@<their node name>`, shown in Live,

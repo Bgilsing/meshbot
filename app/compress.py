@@ -140,3 +140,78 @@ def fit(raw_parts: list[str], bot_name: str, packet_text_bytes: int, max_parts: 
     n = len(chunks)
     res.parts = [f"{c} {i}/{n}" if n > 1 else c for i, c in enumerate(chunks, 1)]
     return res
+
+
+MORE_HINT = " (reply more)"
+
+
+def _markers(chunks: list[str]) -> list[str]:
+    n = len(chunks)
+    return [f"{c} {i}/{n}" if n > 1 else c for i, c in enumerate(chunks, 1)]
+
+
+def _take(text: str, budget: int, n: int, last_less: int = 0) -> tuple[list[str], str]:
+    """Up to n packet texts from the front of `text`, each within budget (the last within budget - last_less).
+    Packets end at a list item boundary (", " or "; ") when one is in the second half, so names stay whole."""
+    chunks = []
+    for i in range(n):
+        if not text:
+            break
+        b = budget - (last_less if i == n - 1 else 0)
+        head = split_text(text, b)[0]
+        if not text.startswith(head):  # split_text re-joined a cut token; fall back to raw bytes
+            head = cut_bytes(text, b)
+        if len(head) < len(text) and not head.endswith((",", ";", ".", ":")):
+            cut = max(head.rfind(", "), head.rfind("; "))
+            if cut > len(head) // 2:
+                head = head[:cut + 1]
+        chunks.append(head)
+        text = text[len(head):].lstrip()
+    return chunks, text
+
+
+def paginate(raw_parts: list[str], bot_name: str, packet_text_bytes: int, max_parts: int, max_batches: int,
+             prefix: bool = True, hint: str = MORE_HINT) -> list[list[str]]:
+    """Split a long answer into numbered packets ("1/8" ... "8/8", counted over the whole answer) and group
+    them into batches of max_parts: the first batch goes out at once, each "more" sends the next. The last
+    packet of every batch but the final one ends with `hint`. Past max_batches the answer is cut with "..."."""
+    pieces = [p for p in (clean(x, bot_name) for x in raw_parts or []) if p]
+    # The model often splits a list over several strings; keep the list's separator where they join.
+    sep = "; " if sum(p.count("; ") for p in pieces) >= sum(p.count(", ") for p in pieces) else ", "
+    text = ""
+    for p in pieces:
+        text += ("" if not text else " " if text[-1] in ".!?;:," else sep) + p
+    max_parts, max_batches = max(1, int(max_parts)), max(1, int(max_batches))
+    if not text:
+        return []
+    if blen(text) <= part_budget(packet_text_bytes, bot_name, 1, prefix):
+        return [[text]]
+    cap = max_parts * max_batches
+    b = part_budget(packet_text_bytes, bot_name, 1, prefix) - blen(f" {cap}/{cap}")
+    batches: list[list[str]] = []
+    while text:
+        if len(batches) == max_batches - 1:  # last batch allowed: no hint, cut what doesn't fit
+            chunks, rest = _take(text, b, max_parts)
+            if rest:
+                chunks[-1] = _shorten_last(chunks[-1], b)
+            batches.append(chunks)
+            break
+        chunks, rest = _take(text, b, max_parts, blen(hint))
+        if rest:
+            batches.append(chunks)
+            text = rest
+            continue
+        # Everything left fits in this batch; take it again without reserving room for the hint.
+        batches.append(_take(text, b, max_parts)[0])
+        break
+    total = sum(len(c) for c in batches)
+    out, i = [], 0
+    for n, chunks in enumerate(batches):
+        batch = []
+        for c in chunks:
+            i += 1
+            batch.append(f"{c} {i}/{total}")
+        if n < len(batches) - 1:
+            batch[-1] += hint
+        out.append(batch)
+    return out

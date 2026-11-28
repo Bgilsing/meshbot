@@ -252,7 +252,7 @@ class MeshTools:
                     + (f" {x['distance_km'] * (0.621371 if self._units() == 'imperial' else 1):.1f}"
                        f"{'mi' if self._units() == 'imperial' else 'km'}"
                        if isinstance(x.get("distance_km"), (int, float)) else "")
-                    for x in nb[:5]))
+                    for x in nb[:15]))
         except T.ToolError:
             pass
         if others:
@@ -260,7 +260,8 @@ class MeshTools:
         return "\n".join(lines), {"found": 1 + len(others), "node": n.get("name")}
 
     async def nodes_list(self, role: str = "", heard_within_h: float | None = None, sort: str = "recent",
-                         limit: int = 10, first_seen_within_h: float | None = None) -> tuple[str, dict]:
+                         limit: int = 10, first_seen_within_h: float | None = None,
+                         offset: int = 0) -> tuple[str, dict]:
         nodes = await self.nodes()
         now = time.time()
         role = (role or "").strip().lower().rstrip("s")
@@ -287,17 +288,22 @@ class MeshTools:
             sel.sort(key=km)
         else:
             sel.sort(key=lambda n: -(_ts(n.get("last_heard") or n.get("last_seen")) or 0))
-        limit = max(1, min(int(limit or 10), 10))
+        limit = max(1, min(int(limit or 10), 40))
+        offset = max(0, int(offset or 0))
         desc = (f"{len(sel)} {role or 'node'}s" + (f" heard in the last {heard_within_h:g}h" if heard_within_h else "")
                 + (f" first seen in the last {first_seen_within_h:g}h" if first_seen_within_h else ""))
-        lines = [desc + f" (of {len(nodes)} known). Top {min(limit, len(sel))} by {sort}:"]
-        for n in sel[:limit]:
+        shown = sel[offset:offset + limit]
+        span = (f"Top {len(shown)}" if not offset else f"Numbers {offset + 1}-{offset + len(shown)}")
+        lines = [desc + f" (of {len(nodes)} known). {span} by {sort}:"]
+        for n in shown:
             line = self._node_line(n, home, now)
             if sort == "new":
                 line += f", first seen {ago(n.get('first_seen'), now)}"
             if sort == "busiest":
                 line += f", {n.get('relay_count_24h') or 0} relays/24h"
             lines.append("- " + line)
+        if offset + len(shown) < len(sel):
+            lines.append(f"({len(sel) - offset - len(shown)} more not listed; use offset={offset + len(shown)})")
         return "\n".join(lines), {"count": len(sel)}
 
     async def overview(self) -> tuple[str, dict]:
@@ -367,7 +373,7 @@ class MeshTools:
         rows = rows if isinstance(rows, list) else []
         nodes = await self.nodes()
         out = []
-        for r in rows[:15]:
+        for r in rows[:40]:
             if not isinstance(r, dict):
                 continue
             nm = r.get("name") or r.get("node_name") or r.get("neighbor_name")
@@ -502,7 +508,7 @@ class MeshTools:
                 nodes = await self.nodes()
                 nb = sorted(r.get("neighbours") or [], key=lambda x: x.get("secs_ago", 1e9))
                 items = [f"{self._names_by_prefix(nodes, x.get('pubkey', ''))} SNR {x.get('snr', 0):.1f} "
-                         f"{ago(time.time() - (x.get('secs_ago') or 0))}" for x in nb[:15]]
+                         f"{ago(time.time() - (x.get('secs_ago') or 0))}" for x in nb[:40]]
                 total = r.get("neighbours_count", len(nb))
                 return (f"{node.get('name')} reports {total} neighbour{'s' * (total != 1)} (radio, logged in as "
                         f"{'admin' if login.get('is_admin') else 'guest'}): " + ("; ".join(items) or "none")), {}
@@ -556,7 +562,7 @@ class MeshTools:
                 return float(v) if v not in (None, "") else None
             return await self.nodes_list(str(args.get("role") or ""), num("heard_within_h"),
                                          str(args.get("sort") or "recent"), int(args.get("limit") or 10),
-                                         num("first_seen_within_h"))
+                                         num("first_seen_within_h"), int(args.get("offset") or 0))
         if name == "mesh_overview":
             return await self.overview()
         if name == "mesh_hops":

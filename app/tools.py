@@ -244,15 +244,21 @@ async def geocode(client, place: str) -> dict:
     return res[0]
 
 
+def _day(daily: dict, key: str, i: int):
+    """daily[key][i], or None when the API left it out."""
+    vals = daily.get(key) or []
+    return vals[i] if i < len(vals) else None
+
+
 async def weather(client, place: str, units: str = "imperial") -> tuple[str, dict]:
     g = await geocode(client, place)
     imp = units != "metric"
     params = {
-        "latitude": g["latitude"], "longitude": g["longitude"], "timezone": "auto", "forecast_days": 3,
+        "latitude": g["latitude"], "longitude": g["longitude"], "timezone": "auto", "forecast_days": 7,
         "current": "temperature_2m,apparent_temperature,relative_humidity_2m,precipitation,weather_code,"
                    "wind_speed_10m,wind_direction_10m,wind_gusts_10m",
         "daily": "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,"
-                 "precipitation_sum,wind_speed_10m_max",
+                 "precipitation_sum,wind_speed_10m_max,wind_gusts_10m_max,uv_index_max,sunrise,sunset",
     }
     if imp:
         params.update(temperature_unit="fahrenheit", wind_speed_unit="mph", precipitation_unit="inch")
@@ -271,7 +277,11 @@ async def weather(client, place: str, units: str = "imperial") -> tuple[str, dic
         lines.append(f"{day}: {WMO.get(dl['weather_code'][i], '?')}, high {round(dl['temperature_2m_max'][i])}{t} "
                      f"low {round(dl['temperature_2m_min'][i])}{t}, precip chance "
                      f"{dl['precipitation_probability_max'][i]}% ({dl['precipitation_sum'][i]} {pr}), "
-                     f"max wind {round(dl['wind_speed_10m_max'][i])} {sp}")
+                     f"max wind {round(dl['wind_speed_10m_max'][i])} {sp}"
+                     + (f" gusts {round(v)}" if (v := _day(dl, "wind_gusts_10m_max", i)) is not None else "")
+                     + (f", UV {round(v)}" if (v := _day(dl, "uv_index_max", i)) is not None else "")
+                     + (f", sun {v[11:16]}-{str(_day(dl, 'sunset', i))[11:16]}"
+                        if (v := _day(dl, "sunrise", i)) else ""))
     if g.get("country_code") == "US":  # NWS alerts are the authoritative US warnings
         try:
             a = await client.get("https://api.weather.gov/alerts/active",
@@ -282,7 +292,8 @@ async def weather(client, place: str, units: str = "imperial") -> tuple[str, dic
             if feats:
                 lines.append("ACTIVE NWS ALERTS: " + "; ".join(
                     f"{f['properties'].get('event')} until {(f['properties'].get('ends') or f['properties'].get('expires') or '?')[:16]}"
-                    for f in feats[:3]))
+                    + (f" ({str(f['properties'].get('headline') or '')[:160]})" if f['properties'].get('headline') else "")
+                    for f in feats[:5]))
             else:
                 lines.append("No active NWS alerts.")
         except Exception as e:
@@ -330,7 +341,10 @@ DEFS = {
             "first_seen_within_h": {"type": "number", "description": "Only nodes first seen (new to the map) "
                                                                     "within this many hours"},
             "sort": {"type": "string", "enum": ["recent", "new", "busiest", "nearest"]},
-            "limit": {"type": "integer", "description": "Max nodes to list (1-10)"}}, "required": []}},
+            "limit": {"type": "integer", "description": "Max nodes to list (1-40, default 10). Ask for more when "
+                                                       "someone wants a full list."},
+            "offset": {"type": "integer", "description": "Skip this many first (for 'show the next ones')"}},
+            "required": []}},
     "mesh_overview": {
         "description": "Overall state of the local mesh: node counts, packet rates, how many nodes and repeaters "
                        "were heard recently, observers online, busiest relays.",

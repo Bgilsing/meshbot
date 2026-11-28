@@ -35,8 +35,9 @@ DECISION_SCHEMA = {
         "respond": {"type": "boolean"},
         "reason": {"type": "string"},
         "parts": {"type": "array", "items": {"type": "string"}},
+        "more": {"type": "array", "items": {"type": "string"}},
     },
-    "required": ["respond", "reason", "parts"],
+    "required": ["respond", "reason", "parts", "more"],
     "additionalProperties": False,
 }
 
@@ -50,6 +51,7 @@ class Decision:
     respond: bool = False
     reason: str = ""
     parts: list[str] = field(default_factory=list)
+    more: list[str] = field(default_factory=list)  # rest of a long answer, sent page by page on "more"
     raw: str = ""
     latency_s: float = 0.0
     usage: dict = field(default_factory=dict)
@@ -149,12 +151,31 @@ def runtime_rules(bot_name: str, channel: dict, now: datetime | None = None, max
         + tool_rules(channel, max_searches)
         + "\n"
         "## Output format\n"
-        'Reply with ONLY a JSON object: {"respond": true|false, "reason": "<few words why>", "parts": ["..."]}\n'
+        'Reply with ONLY a JSON object: {"respond": true|false, "reason": "<few words why>", "parts": ["..."], '
+        '"more": []}\n'
         "- parts is [] when respond is false.\n"
         f"- One part may be at most {one} characters. If you need several, each at most {many} characters, "
         f"and never more than {maxp} parts. Prefer one part.\n"
-        "- Do not number the parts; that is added for you."
+        "- Do not number the parts; that is added for you.\n"
+        + more_rule(channel)
     )
+
+
+def more_rule(channel: dict) -> str:
+    pages = int(channel.get("more_pages") or 0)
+    if pages < 2:
+        return "- more is always []."
+    maxp = int(channel["max_parts"])
+    return ("- more holds extra detail, sent only to people who reply 'more'. parts is the answer itself: most "
+            f"relevant facts first, complete on its own. When there is more that someone could genuinely want, put "
+            "it in more, most useful first, as plain text (up to about "
+            f"{maxp * (pages - 1)} parts). Examples: weather -> parts: any alert, now, and the days asked about; "
+            "more: the rest of the forecast day by day, wind/gusts, sunrise/sunset, alert details; a node or repeater -> neighbors, battery, activity, location; search "
+            "-> further findings with their sources; a list -> the remaining items (don't cut a list short, "
+            "fetch enough items with your tools). Leave more [] for chat, simple questions, or when nothing "
+            f"useful is left. Parts are sent {maxp} at a time, numbered over the whole answer (1/8, 2/8...), and "
+            "people reply 'more' for the next ones; that numbering and hint are added for you, so don't mention "
+            "'more' yourself.")
 
 
 def parse_json(content: str) -> dict:
@@ -288,7 +309,7 @@ class Brain:
 
     @staticmethod
     def _max_tokens(llm: dict) -> int:
-        return int(llm.get("thinking_max_tokens") or 4000) if llm.get("thinking") else int(llm.get("max_tokens", 700))
+        return int(llm.get("thinking_max_tokens") or 10000) if llm.get("thinking") else int(llm.get("max_tokens", 2000))
 
     def build_prompts(self, system_prompt: str, channel: dict, msgs: list[Msg]) -> tuple[str, str]:
         bot = self.cfg.bot_name
@@ -517,6 +538,8 @@ class Brain:
             if isinstance(parts, str):
                 parts = [parts]
             d.parts = [str(p) for p in parts if str(p).strip()]
+            more = obj.get("more") or []
+            d.more = [str(p) for p in ([more] if isinstance(more, str) else more) if str(p).strip()]
             if d.respond and not d.parts:
                 d.respond, d.reason = False, (d.reason + " [no text]").strip()
         except Exception as e:  # network, HTTP, JSON: never reply on a failed decision
@@ -536,7 +559,7 @@ class Brain:
         per = part_budget(int(channel["packet_text_bytes"]), bot, maxp, not channel.get("dm"))
         system = ("You compress answers for a tiny-bandwidth mesh radio. Plain ASCII, no markdown, telegraphic, "
                   "keep the key facts and numbers, drop everything else. "
-                  'Return ONLY JSON: {"respond": true, "reason": "shortened", "parts": ["..."]}. '
+                  'Return ONLY JSON: {"respond": true, "reason": "shortened", "parts": ["..."], "more": []}. '
                   f"At most {maxp} parts, each at most {per} characters. Prefer fewer parts.")
         d = await self._decide_raw(system, "Compress this answer:\n\n" + " ".join(parts), channel, use_tools=False)
         return d.parts if d.parts and not d.error else None

@@ -63,6 +63,11 @@ CHANNEL_FIELDS = [
     F("radio_queries", "bool", "Radio queries", False,
       "Also let it transmit: log in to a named repeater as guest for its neighbors/status, and run live path "
       "discovery. Uses airtime; capped in Settings > Mesh data. Needs Mesh data tools on."),
+    F("more_pages", "int", "Batches for 'more'", 10,
+      "A long list (say, every repeater heard today) is numbered over the whole answer (1/8, 2/8...): the first "
+      "Max parts go out at once and anyone replies 'more' for the next batch. This is the most batches one "
+      "answer may hold (10 x 3 parts = 30 packets); 0 = off (long answers are shortened instead). Unsent parts "
+      "expire after 30 minutes.", 0, 30),
     F("advert_requests", "bool", "Advert on request", True,
       "Let people ask the bot to send an advert (so their node learns it and can DM it). Rate-limited in "
       "Settings > Adverts. Not sent in shadow mode."),
@@ -90,6 +95,8 @@ DIRECT_FIELDS = [
     F("callsign_lookup", "bool", "Callsign lookup", True, ""),
     F("mesh_data", "bool", "Mesh data tools", False, ""),
     F("radio_queries", "bool", "Radio queries", False, "Needs Mesh data tools on."),
+    F("more_pages", "int", "Batches for 'more'", 10, "Long lists go out Max parts at a time; 'more' sends the "
+      "next batch. 0 = off.", 0, 30),
     F("advert_requests", "bool", "Advert on request", True, ""),
 ]
 
@@ -119,8 +126,9 @@ SECTIONS = [
         F("failover_hold_s", "float", "Failover hold (s)", 300,
           "After the primary fails, go straight to the fallback for this long, then try the primary again.", 0, 86400),
         F("temperature", "float", "Temperature", 0.4, "Lower = more consistent, higher = more creative.", 0, 2),
-        F("max_tokens", "int", "Max tokens", 700, "Upper bound on the model's output when thinking is off.", 50, 8000),
-        F("thinking_max_tokens", "int", "Max tokens (thinking on)", 4000,
+        F("max_tokens", "int", "Max tokens", 2000, "Upper bound on the model's output when thinking is off. A paged "
+          "long answer ('more') needs room: about 1500.", 50, 8000),
+        F("thinking_max_tokens", "int", "Max tokens (thinking on)", 10000,
           "Used instead of Max tokens when thinking is on: the reasoning counts against the limit too. "
           "Raise Timeout as well if replies start timing out.", 200, 32000),
         F("timeout_s", "float", "Timeout (s)", 60, "Give up on a model call after this long.", 5, 600),
