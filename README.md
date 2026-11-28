@@ -153,6 +153,8 @@ a timeout to every message. "Test models" on the Dashboard ends a hold early.
 - **Radio queries** (needs Mesh data):
   - Naming a repeater makes the bot log in to it as guest over the air, adding it as a contact if needed.
     `mesh_hops live=true` runs a path discovery.
+  - Every request (login, neighbours, status, path discovery) is retried up to `radio_attempts` times, since the
+    mesh drops packets. Logins always flood with a freshly reset path; other requests flood on their last try.
   - Capped by `radio_max_per_hour`. Results are cached per repeater, and a failed query falls back to the network
     map.
 - **Home Assistant** (`app/hass.py`), per channel: `off` (default), `read` or `control`.

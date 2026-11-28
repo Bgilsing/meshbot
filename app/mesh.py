@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import time
 from dataclasses import dataclass
 from typing import Awaitable, Callable
@@ -288,27 +289,55 @@ class Mesh:
         log.info("added contact %s (%s)", c["adv_name"], node["public_key"][:8])
         return c
 
-    async def login(self, pubkey: str, password: str, timeout: float) -> dict:
-        """Log in to a repeater/room. Returns the LOGIN_SUCCESS payload; raises on failure or timeout."""
+    async def login(self, pubkey: str, password: str, timeout: float, attempts: int = 3) -> dict:
+        """Log in to a repeater/room. Returns the LOGIN_SUCCESS payload; raises on refusal or when no attempt was
+        answered within `timeout` seconds in total.
+
+        Like a phone does, it retries: a busy repeater misses logins (collisions with other traffic are common).
+        Every attempt first forgets the stored route and floods, because routes change (and a route learned under
+        another path-hash size is useless). The reply teaches the companion the current route for what follows."""
         mc = self._need()
         prefix = pubkey[:12]
-        r = await mc.commands.send_login(pubkey, password)
-        if r is None or r.type == EventType.ERROR:
-            raise RuntimeError(f"login not sent: {None if r is None else r.payload}")
         ok = asyncio.ensure_future(mc.dispatcher.wait_for_event(EventType.LOGIN_SUCCESS,
                                                                 attribute_filters={"pubkey_prefix": prefix},
                                                                 timeout=timeout))
         bad = asyncio.ensure_future(mc.dispatcher.wait_for_event(EventType.LOGIN_FAILED,
                                                                  attribute_filters={"pubkey_prefix": prefix},
                                                                  timeout=timeout))
-        done, pending = await asyncio.wait({ok, bad}, return_when=asyncio.FIRST_COMPLETED)
-        for t in pending:
-            t.cancel()
-        if ok in done and ok.result():
-            return ok.result().payload
-        if bad in done and bad.result():
-            raise PermissionError("login refused (wrong guest password?)")
-        raise TimeoutError("no answer to login (out of range or busy)")
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        attempts = max(1, int(attempts))
+        try:
+            for n in range(attempts):
+                left = deadline - loop.time()
+                if left <= 1:
+                    break
+                try:
+                    rp = await mc.commands.reset_path(pubkey)
+                    if rp is None or rp.type == EventType.ERROR:
+                        log.debug("reset_path %s: %s", prefix[:8], None if rp is None else rp.payload)
+                except Exception as e:
+                    log.debug("reset_path %s failed: %s", prefix[:8], e)
+                r = await mc.commands.send_login(pubkey, password)
+                if r is None or r.type == EventType.ERROR:
+                    raise RuntimeError(f"login not sent: {None if r is None else r.payload}")
+                suggested = float((r.payload or {}).get("suggested_timeout") or 0) / 800  # ms, +25% like meshcore
+                # Split what's left over the remaining attempts, but give each at least the companion's estimate.
+                wait = min(left, max(suggested, left / (attempts - n)))
+                log.info("login %s attempt %d/%d (flood), waiting %.0fs", prefix[:8], n + 1, attempts, wait)
+                done, _ = await asyncio.wait({ok, bad}, timeout=wait, return_when=asyncio.FIRST_COMPLETED)
+                if ok in done and ok.result():
+                    return ok.result().payload
+                if bad in done and bad.result():
+                    raise PermissionError("login refused (wrong guest password?)")
+                if done:  # a waiter ended without an event (its own timeout)
+                    break
+                await asyncio.sleep(random.uniform(0.5, 2.5))  # don't collide with someone else's retry again
+        finally:
+            for t in (ok, bad):
+                t.cancel()
+        raise TimeoutError(f"no answer to {attempts} login attempts (repeater busy, out of range, or it needs a "
+                           "guest password)")
 
     async def logout(self, pubkey: str) -> None:
         try:
@@ -316,13 +345,57 @@ class Mesh:
         except Exception as e:
             log.debug("logout failed: %s", e)
 
-    async def neighbours(self, pubkey: str, timeout: float) -> dict | None:
-        return await self._need().commands.fetch_all_neighbours(pubkey, pubkey_prefix_length=4,
-                                                                timeout=timeout, min_timeout=5)
+    async def _with_retries(self, what: str, pubkey: str, call, timeout: float, attempts: int):
+        """Run one over-the-air request with retries: the mesh drops packets. `call(t)` sends once and waits up
+        to t seconds, returning None when nothing came back. `timeout` is the budget for all attempts. The last
+        retry forgets the stored route first, so it floods in case the direct path is what's failing."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        attempts = max(1, int(attempts))
+        last_err = None
+        for n in range(attempts):
+            left = deadline - loop.time()
+            if left <= 1:
+                break
+            flood = n > 0 and n == attempts - 1
+            if flood:
+                try:
+                    await self._need().commands.reset_path(pubkey)
+                except Exception as e:
+                    log.debug("reset_path %s failed: %s", pubkey[:8], e)
+            per = min(left, left / (attempts - n))
+            log.info("%s %s attempt %d/%d%s, waiting %.0fs", what, pubkey[:8], n + 1, attempts,
+                     " (flood)" if flood else "", per)
+            try:
+                r = await call(per)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                r, last_err = None, e
+                log.info("%s %s attempt %d failed: %s", what, pubkey[:8], n + 1, e)
+            if r:
+                return r
+            await asyncio.sleep(random.uniform(0.5, 2.5))
+        if last_err and not isinstance(last_err, (TimeoutError, asyncio.TimeoutError)):
+            raise last_err
+        return None
 
-    async def status_req(self, pubkey: str, timeout: float) -> dict | None:
-        return await self._need().commands.req_status_sync(pubkey, timeout=timeout, min_timeout=5)
+    async def neighbours(self, pubkey: str, timeout: float, attempts: int = 3) -> dict | None:
+        mc = self._need()
+        return await self._with_retries(
+            "neighbours", pubkey, lambda t: mc.commands.fetch_all_neighbours(
+                pubkey, pubkey_prefix_length=4, timeout=t, min_timeout=min(5, t)), timeout, attempts)
 
-    async def path_discovery(self, pubkey: str, timeout: float) -> dict | None:
-        r = await self._need().commands.send_path_discovery_sync(pubkey, timeout=timeout, min_timeout=5)
-        return r.payload if r is not None and r.type != EventType.ERROR else None
+    async def status_req(self, pubkey: str, timeout: float, attempts: int = 3) -> dict | None:
+        mc = self._need()
+        return await self._with_retries(
+            "status", pubkey, lambda t: mc.commands.req_status_sync(pubkey, timeout=t, min_timeout=min(5, t)),
+            timeout, attempts)
+
+    async def path_discovery(self, pubkey: str, timeout: float, attempts: int = 3) -> dict | None:
+        mc = self._need()
+
+        async def once(t):
+            r = await mc.commands.send_path_discovery_sync(pubkey, timeout=t, min_timeout=min(5, t))
+            return r.payload if r is not None and r.type != EventType.ERROR else None
+        return await self._with_retries("path discovery", pubkey, once, timeout, attempts)

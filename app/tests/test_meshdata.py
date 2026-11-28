@@ -162,7 +162,7 @@ class FakeMesh:
     async def ensure_contact(self, node):
         self.calls.append(("contact", node["name"]))
 
-    async def login(self, pk, pw, timeout):
+    async def login(self, pk, pw, timeout, attempts=3):
         self.calls.append(("login", pw))
         if self._login == "refused":
             raise PermissionError("login refused (wrong guest password?)")
@@ -173,14 +173,14 @@ class FakeMesh:
     async def logout(self, pk):
         self.calls.append(("logout",))
 
-    async def neighbours(self, pk, timeout):
+    async def neighbours(self, pk, timeout, attempts=3):
         return {"neighbours_count": 2, "neighbours": [{"pubkey": "ad5b1111", "secs_ago": 50, "snr": 7.5},
                                                       {"pubkey": "ffff0000", "secs_ago": 4000, "snr": -3.0}]}
 
-    async def status_req(self, pk, timeout):
+    async def status_req(self, pk, timeout, attempts=3):
         return {"uptime": 172800, "bat": 4100, "noise_floor": -110, "last_snr": 5.5, "nb_recv": 10, "nb_sent": 4}
 
-    async def path_discovery(self, pk, timeout):
+    async def path_discovery(self, pk, timeout, attempts=3):
         self.calls.append(("path",))
         return {"out_path_len": 2, "out_path": "ad5b6751", "out_path_hash_len": 2}
 

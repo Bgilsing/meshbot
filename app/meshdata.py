@@ -441,9 +441,10 @@ class MeshTools:
 
     async def _path_discovery(self, node: dict, path_names) -> tuple[str, dict]:
         await self.mesh.ensure_contact(node)
-        r = await self.mesh.path_discovery(node["public_key"], float(self._m("radio_timeout_s")))
+        tries = int(self._m("radio_attempts"))
+        r = await self.mesh.path_discovery(node["public_key"], float(self._m("radio_timeout_s")), tries)
         if not r:
-            raise TimeoutError("no path response (out of range or busy)")
+            raise TimeoutError(f"no path response after {tries} tries (out of range or busy)")
         n = r.get("out_path_len", 0)
         via = path_names(r.get("out_path", ""), r.get("out_path_hash_len", 1))
         return (f"Live path discovery: {node.get('name')} is {n} hop{'s' * (n != 1)} from {self.cfg.bot_name}"
@@ -491,13 +492,13 @@ class MeshTools:
         pk = node["public_key"]
         timeout = float(self._m("radio_timeout_s"))
         await self.mesh.ensure_contact(node)
-        login = await self.mesh.login(pk, self.guest_password(str(node.get("name") or "")), timeout)
+        tries = int(self._m("radio_attempts"))
+        login = await self.mesh.login(pk, self.guest_password(str(node.get("name") or "")), timeout, tries)
         try:
             if what == "neighbors":
-                r = await self.mesh.neighbours(pk, timeout)
+                r = await self.mesh.neighbours(pk, timeout, tries)
                 if r is None:
-                    raise TimeoutError("logged in, but no neighbour list came back (guest access may not "
-                                       "include it)")
+                    raise TimeoutError(f"logged in, but no neighbour list came back after {tries} tries")
                 nodes = await self.nodes()
                 nb = sorted(r.get("neighbours") or [], key=lambda x: x.get("secs_ago", 1e9))
                 items = [f"{self._names_by_prefix(nodes, x.get('pubkey', ''))} SNR {x.get('snr', 0):.1f} "
@@ -505,9 +506,9 @@ class MeshTools:
                 total = r.get("neighbours_count", len(nb))
                 return (f"{node.get('name')} reports {total} neighbour{'s' * (total != 1)} (radio, logged in as "
                         f"{'admin' if login.get('is_admin') else 'guest'}): " + ("; ".join(items) or "none")), {}
-            r = await self.mesh.status_req(pk, timeout)
+            r = await self.mesh.status_req(pk, timeout, tries)
             if r is None:
-                raise TimeoutError("logged in, but no status came back")
+                raise TimeoutError(f"logged in, but no status came back after {tries} tries")
             bits = [f"up {r['uptime'] / 86400:.1f}d" if r.get("uptime") else "",
                     f"battery {r['bat'] / 1000:.2f}V" if r.get("bat") else "",
                     f"noise floor {r['noise_floor']}dBm" if r.get("noise_floor") else "",
